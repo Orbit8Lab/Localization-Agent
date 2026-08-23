@@ -1136,6 +1136,83 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def _cmd_observations(args) -> int:
+    """Read the PLAN §3 observation log.
+
+    This is the report Phase 1 exists to produce. It answers the two
+    questions that decide whether Phase 4 (retrieval + promotion) should be
+    built at all (PLAN §6.1):
+
+    1. Do defect signatures RECUR across strings? `strings` counts distinct
+       segments, not observations — a signature seen 9 times on one string
+       is a repair loop flapping, not a defect class, and only the former
+       can become a skill.
+    2. Does our own scorer agree with the human at G3? `overturned` counts
+       strings a reviewer edited or rejected. A signature that improves
+       badness and gets overturned anyway is evidence a gate check is
+       miscalibrated — promotion trained on badness would learn the wrong
+       thing (PLAN §5.6).
+    """
+    from .observation import ObservationLog
+
+    job = Job(Path(args.root), args.job_id)
+    path = job.store.observations_path()
+    log = ObservationLog(path)
+    rows = log.all_rows()
+    if not rows:
+        print(f"no observations yet ({path})")
+        print("Stage 4 writes these as the ratchet accepts or rolls back "
+              "candidates.")
+        return 0
+
+    verdicts = log.counts()
+    ruled = [r for r in rows if r["g3_verdict"] != "pending"]
+    print(f"observations: {len(rows)}   strings: "
+          f"{len({r['uid'] for r in rows})}   "
+          f"attempts: {sorted({r['attempt'] for r in rows})}")
+    print("ratchet:      " + "  ".join(
+        f"{k}:{v}" for k, v in sorted(verdicts.items())))
+    print(f"G3 ruled:     {len(ruled)}/{len(rows)}"
+          + ("   (no human verdicts yet — approve G3 to populate)"
+             if not ruled else ""))
+
+    tally = log.signature_tally()
+    recurring = [t for t in tally if t["distinct_strings"] > 1]
+    print(f"\nsignatures:   {len(tally)} distinct, "
+          f"{len(recurring)} seen on more than one string")
+    if not recurring:
+        # Stated plainly because it is the single most useful negative
+        # result this log can produce: no recurrence means no skill to
+        # learn, and Phase 4 should not be built (PLAN §6.1).
+        print("  NOTE: nothing recurs across strings yet. Until it does, "
+              "there is no\n        defect CLASS to learn — only a "
+              "per-string cache (PLAN §4.2, §6.1).")
+
+    limit = args.limit
+    print(f"\n{'signature':<44}{'n':>5}{'strings':>9}{'acc':>6}{'rej':>6}"
+          f"{'G3ok':>7}{'G3ovr':>7}")
+    print("-" * 84)
+    for row in tally[:limit]:
+        print(f"{row['signature'][:43]:<44}{row['n']:>5}"
+              f"{row['distinct_strings']:>9}{row['accepted'] or 0:>6}"
+              f"{row['rejected'] or 0:>6}{row['g3_accepted'] or 0:>7}"
+              f"{row['g3_overturned'] or 0:>7}")
+    if len(tally) > limit:
+        print(f"... {len(tally) - limit} more (--limit to widen)")
+
+    disagreements = [t for t in tally
+                     if (t["g3_overturned"] or 0) > (t["g3_accepted"] or 0)]
+    if disagreements:
+        print(f"\n{len(disagreements)} signature(s) overturned by G3 more "
+              "often than upheld —\nthese are the miscalibrated checks "
+              "(PLAN §5.6), not promotion candidates:")
+        for row in disagreements[:10]:
+            print(f"  {row['signature']}  "
+                  f"upheld {row['g3_accepted'] or 0} / "
+                  f"overturned {row['g3_overturned'] or 0}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="orbit8",
@@ -1610,6 +1687,16 @@ def main(argv=None) -> int:
     status.add_argument("root")
     status.add_argument("job_id")
     status.set_defaults(func=_cmd_status)
+
+    obs = sub.add_parser(
+        "observations",
+        help="repair-attempt log: do defect signatures recur, and does the "
+             "gate agree with G3? (PLAN §3)")
+    obs.add_argument("root")
+    obs.add_argument("job_id")
+    obs.add_argument("--limit", type=int, default=25,
+                     help="signature rows to print (default 25)")
+    obs.set_defaults(func=_cmd_observations)
 
     args = parser.parse_args(argv)
     return args.func(args)

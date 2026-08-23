@@ -147,3 +147,11 @@ class JobStore:
         path = self.job_dir / "assets" / "tm.db"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    def observations_path(self) -> Path:
+        """The PLAN §3 observation log. Job-scoped and NOT attempt-scoped:
+        its whole purpose is comparing outcomes ACROSS attempts, so each row
+        carries its own attempt number instead."""
+        path = self.job_dir / "assets" / "observations.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
