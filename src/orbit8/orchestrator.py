@@ -1,0 +1,726 @@
+"""Chat orchestrator — the natural-language interface layer OVER the
+deterministic Job Controller.
+
+Two-layer contract (design §1/§7 preserved exactly):
+
+- The orchestrator LLM interprets the operator's text and decides WHICH
+  controller tools to call. It cannot skip a stage, write an artifact, or
+  clear a gate on its own initiative, because those capabilities simply do
+  not exist in its tool set — a missing tool is a guarantee, a prompt rule
+  is only a suggestion. `approve` exists but records the OPERATOR (the
+  human named at chat start) and the controller still validates gate order.
+- Execution stays deterministic: every tool is a thin wrapper over the
+  same `Job` API the CLI uses.
+
+The loop is provider-agnostic (works on any `Provider.complete`): each
+step the model returns ONE JSON `ToolCall`; observations are appended to
+the transcript; `respond` ends the turn. Hard cap on steps per turn.
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from pydantic import Field
+
+from .controller import GATE_NAMES, Job
+from .llm import Provider, complete_json
+from .memory import RunDB
+from .schemas import IntakeBrief, Strict
+
+MAX_STEPS_PER_TURN = 14
+OBSERVATION_LIMIT = 12000         # chars of tool output fed back to the model
+# inspect_file's window must stay UNDER OBSERVATION_LIMIT: the outer cap
+# applies to the whole JSON envelope (filename, counts, offsets), so a
+# window sized at the cap would have its tail clipped again a layer later
+# and the paging offsets would lie.
+INSPECT_TEXT_LIMIT = 8000         # default inspect_file text window
+INSPECT_TEXT_MAX = 10000          # ceiling a caller may request
+
+
+class ToolCall(Strict):
+    tool: str
+    args: Dict[str, object] = Field(default_factory=dict)
+    message: Optional[str] = None      # required when tool == "respond"
+
+
+SYSTEM = """You are Orbit8, the operator interface of a game-localization \
+job. You interpret the operator's request, call tools to inspect or advance \
+the job, then answer. The pipeline itself is deterministic — you only \
+decide which tool to call next.
+
+TOOLS (respond with ONE JSON object per step, no prose, no fences):
+- {"tool": "status", "args": {}} — job phase, gate states, per-locale counts
+- {"tool": "next_step", "args": {}} — run the job's next stage step; stops \
+at gates automatically
+- {"tool": "approve", "args": {"gate": "G0".."G5"}} — record the operator's \
+gate approval
+- {"tool": "read_artifact", "args": {"stage": 0-7, "name": "<artifact>"}} — \
+read one artifact envelope
+- {"tool": "list_artifacts", "args": {"stage": 0-7}} — list a stage's files
+- {"tool": "flagged", "args": {"locale": "<loc>", "limit": 10}} — strings \
+awaiting human review (MTPE/flagged)
+- {"tool": "list_files", "args": {"dir": "<path>"}} — list files under a \
+directory inside the project folder
+- {"tool": "inspect_file", "args": {"path": "<file>", "offset": 0, \
+"limit": 4000}} — read-only peek: a text window plus line/entry counts \
+(use before deciding how to standardize anything). If the result says \
+"truncated": true, the file continues — call again with "offset": \
+<next_offset> to read on. NEVER describe content you have not actually \
+read in a window; page to it first.
+- {"tool": "standardize", "args": {"files": ["<file>", …], "output": \
+"source_json" | "bilingual_jsonl", "out_name": "<name>"}} — convert \
+received files into a pipeline format. source_json: flat {key: source \
+text} translation input, any supported/adapted format. bilingual_jsonl: \
+LQA/MT input paired from target-language .po files (msgid=source, \
+msgstr=target) — inspect first to confirm msgstr is actually filled. \
+Writes under the job's exports/ dir.
+- {"tool": "analyze", "args": {"files": ["<file>", …], "classify": \
+false}} — corpus text analysis: total/unique strings, word counts (CJK \
+chars count as words), placeholders, and the domain breakdown with \
+story-lines (dialogue+marketing) vs instructions (ui+system) rollup. \
+Classification is reused from this job's earlier runs at no cost; set \
+"classify": true only if strings are still unlabeled.
+- {"tool": "compare_po", "args": {"old": "<previous .po>", "new": \
+"<newly received .po>", "out_dir": "<optional report dir>"}} — diff a new \
+.po drop against the previous version: added/removed keys, changed \
+sources, modified translations, plus red flags (translations LOST — \
+filled before, empty now — and STALE — source changed but translation \
+did not). ALWAYS run this when the operator mentions receiving an \
+updated/new .po for a file we already have; surface the red flags and \
+word counts (the incremental work basis) in your answer. The result \
+lists the actual changed entries under "source_changed" — quote those \
+keys when asked WHICH entry changed; never infer a key from a count.
+- {"tool": "update_glossary", "args": {"assets": "<dir with zh/en_asset\
+.json + dedup_index.json>", "pe_po": "<post-edited bilingual .po>", \
+"decisions": "<optional decisions .xlsx (映射留档/翻译裁定)>", "terms": \
+{"<source term>": "<target rendering>", …}, "out_dir": "<output dir>", \
+"distill": true}} — \
+refresh the \
+asset-pair glossary from post-editing results. Deterministic: assets \
+join to PE strings via the dedup index; conflicting duplicate renderings \
+resolve by decision compliance then majority, else stay flagged; a term \
+audit lists every entry violating a decided rendering; frequent \
+undocumented old→new EN replacements are mined as suggestions. With \
+"distill": true, additionally boil everything down to a compact \
+term-level glossary (glossary_terms.xlsx/.json, pipeline T1 shape) — \
+use when the operator wants a clean glossary list rather than \
+item-by-item review. Surface \
+open conflicts, violations and suggestions to the operator — they are \
+review work, not errors to hide.
+- {"tool": "translate_po", "args": {"po": "<received bilingual .po>", \
+"glossary": "<optional — omit to use the project's active termbase at \
+40-reference/glossary/glossary_terms.json>", "out_dir": "<work folder>", \
+"game": "<name>", "batch_size": 12, "reuse_from": "<previous translated \
+.po, optional>"}} — translate ONLY the untranslated strings of a \
+received drop, glossary-constrained (locked terms + family rules are \
+law; exact-hit strings prefill with zero LLM cost; violators get one \
+repair retry, survivors stay flagged). ALWAYS pass "reuse_from" when a \
+previous translation run or delivery of the same file exists (list_files \
+the work folders to find it): matching entries — same key, then \
+identical source text — are carried over verbatim instead of \
+re-translated, so only genuinely NEW strings cost LLM calls. When the \
+operator says 已翻译的部分直接提取/复用 they mean exactly this. \
+DeepSeek. Outputs a stream-patched copy (untouched entries \
+byte-identical), the standard MTPE form for post-editing, and a report. \
+This is a WORK PRODUCT, not a delivery — deliveries go through \
+deliver_po after post-editing.
+- {"tool": "scan_po", "args": {"po": "<translated bilingual .po>", \
+"glossary": "<optional — defaults to the project's active termbase>", \
+"out_dir": "<work folder>", "game": "<name>", \
+"deterministic_only": false}} — run a FULL LQA scan on any translated \
+.po without a job pipeline: the same tier cascade (T1 mechanical → T2 \
+consistency → T3 LLM semantic → verify) with tier stamps and a verified \
+cascade ledger, plus a whole-file check for the same source shipped with \
+DIFFERENT renderings. Outputs a client bug report xlsx, an LQA PE form \
+for the post-editors, a tech summary and a scan report. Use this \
+whenever the operator asks to LQA / QA / 扫描 a .po file — do NOT try to \
+standardize it or run job stages first. "deterministic_only": true \
+skips all LLM calls (T1+T2 only).
+- {"tool": "add_glossary_terms", "args": {"glossary": \
+"<glossary_terms.json>", "terms": {"<source term>": "<rendering>", …}, \
+"origin": "operator <date>", "force": false}} — the operator dictating \
+terms directly ("把X加进术语表", "add these terms"). Each becomes a \
+LOCKED entry with provenance; an unlocked mined entry is overwritten; \
+an existing RULING is NOT overwritten — it comes back as a conflict for \
+the operator to confirm (then re-call with "force": true). Alias forms \
+share one key separated by "/"; a rename uses "old>new" as the key. A \
+.bak is kept and the xlsx view is re-rendered. ALWAYS report conflicts \
+verbatim and ask before forcing.
+- {"tool": "extract_glossary", "args": {"po": ["<bilingual .po>", …], \
+"decisions": "<optional decisions .xlsx>", "terms": \
+{"<source term>": "<rendering>", …}, "out_dir": "<output dir>", \
+"min_freq": 3, \
+"llm_filter": false, "game": "<name>"}} — corpus-first term extraction \
+(stages 0-3): dedup + markup stripping, Han n-gram mining over the FULL \
+corpus INCLUDING sentence interiors (terms living only inside sentences \
+become candidates), noise filter (LLM when llm_filter true, else \
+deterministic heuristic), assembly with locked decisions. Outputs a T1 \
+glossary + a TERM-level Glossary PE review (one row per term — a locked \
+term violated in 7 strings is ONE row; string detail stays in the \
+audit) + a Needs-EN work queue. Prefer this over update_glossary when \
+the operator wants a glossary BUILT from a corpus or complains the \
+review has sentence-length entries.
+- {"tool": "deliver_po", "args": {"review": "<filled review .xlsx>", \
+"po_files": ["<shipped .po>", …], "out_dir": "<optional, default \
+30-deliverables>", "timestamp": "<optional YYYYMMDD>"}} — apply the \
+post-editing team's decisions to the .po files and write a timestamped \
+delivery folder with a delivery report. The review workbook may be \
+EITHER a filled standard PE form (MTPE / LQA PE: StringID + PE_Decision \
++ PE_Modification — the shape translate_po and the LQA stage emit) OR a \
+reviewed client bug report (Location/String ID + Decision + Modify \
+Version); the shape is detected automatically, so never ask the \
+operator to add or rename columns. Accept applies the proposed target, \
+Reject&Modification applies the reviewer's text, Keep-as-it-is / \
+Cannot Answer / blank leave the string alone. Deterministic; \
+accepted pairs write back to the job TM as human-confirmed. Undecided/\
+conflicting rows are never applied — report them to the operator. The \
+po_sanity gate runs on every output by default (format/import safety, \
+header label + branding, summary vs source); if the result says \
+"blocked": true the delivery MUST NOT be sent — tell the operator why.
+- {"tool": "respond", "args": {}, "message": "<your answer>"} — end the \
+turn and reply to the operator
+
+RULES:
+- The project's ACTIVE glossary is \
+40-reference/glossary/glossary_terms.json. Prefer it over any \
+glossary_terms.json inside a dated 20-work/ run folder — those are the \
+audit record of the round that produced a glossary, not the current \
+termbase. Omit the "glossary" argument to let the tool resolve it; if a \
+result carries a "glossary_notes" WARNING, relay it and suggest \
+`orbit8 glossary promote`.
+- ALWAYS end the turn with "respond".
+- Call "approve" ONLY when the operator explicitly asked to approve that \
+gate in their CURRENT message. Never approve to unblock yourself; when a \
+gate is pending, describe what needs review and stop.
+- "next_step" runs ONE step. Chain several when the operator asked to \
+advance the job, but stop the moment a gate appears or a step fails.
+- Answer in the operator's language. Be concrete: quote phases, counts, \
+and finding messages from tool output. Never invent tool results.
+- If a tool errors, report the error honestly and stop."""
+
+
+class ChatOrchestrator:
+    def __init__(self, job: Job, provider: Provider, *, operator: str,
+                 provider_factory=None, dry_run: bool = False,
+                 on_action: Optional[Callable[[str, str], None]] = None,
+                 on_start: Optional[Callable[[str, dict], None]] = None,
+                 trace_path: Optional[Path] = None):
+        self.job = job
+        self.provider = provider
+        self.operator = operator
+        self.provider_factory = provider_factory
+        self.dry_run = dry_run
+        self.on_action = on_action or (lambda tool, result: None)
+        # fired BEFORE a tool runs, so a long call is visibly running
+        # rather than indistinguishable from a hang
+        self.on_start = on_start or (lambda tool, args: None)
+        self.history: List[tuple] = []      # (role, text)
+        # debugging surface: full tool args + untruncated results, in
+        # memory for /debug and on disk for post-mortem (JSONL).
+        self.trace: List[dict] = []
+        self.trace_path = Path(trace_path) if trace_path else None
+        self.turn_no = 0
+
+    # ------------------------------------------------------------- tools
+
+    def _t_status(self, args: dict) -> str:
+        control = self.job.control
+        stage = self.job.derive()
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        counts = {}
+        for locale in intake.target_locales:
+            path = self.job.store.run_db_path(locale)
+            if path.exists():
+                counts[locale] = RunDB(path).counts()
+        return json.dumps({
+            "phase": stage.phase, "action": stage.action,
+            "pending_gate": stage.gate,
+            "gate_name": GATE_NAMES.get(stage.gate) if stage.gate else None,
+            "target": stage.target,
+            "approvals": control["approvals"], "counts": counts},
+            ensure_ascii=False, default=str)
+
+    def _t_next_step(self, args: dict) -> str:
+        stage = self.job.next_step(self.provider_factory,
+                                   dry_run=self.dry_run)
+        after = self.job.derive()
+        return json.dumps({
+            "ran": None if stage.gate else
+                   {"phase": stage.phase, "action": stage.action,
+                    "target": stage.target},
+            "now": {"phase": after.phase, "action": after.action,
+                    "pending_gate": after.gate}}, ensure_ascii=False)
+
+    def _t_approve(self, args: dict) -> str:
+        gate = str(args.get("gate", ""))
+        self.job.approve(gate, by=self.operator,
+                         note="approved via orbit8 chat")
+        return f"{gate} approved by {self.operator}"
+
+    def _t_read_artifact(self, args: dict) -> str:
+        stage = int(args.get("stage", -1))
+        name = str(args.get("name", ""))
+        path = self.job.store.stage_dir(stage) / f"{name}.json"
+        if not path.exists():
+            return f"error: no artifact {name!r} in stage {stage}"
+        return path.read_text(encoding="utf-8")
+
+    def _t_list_artifacts(self, args: dict) -> str:
+        stage = int(args.get("stage", -1))
+        directory = self.job.store.stage_dir(stage)
+        if not directory.exists():
+            return "[]"
+        return json.dumps(sorted(p.name for p in directory.iterdir()))
+
+    def _t_flagged(self, args: dict) -> str:
+        locale = str(args.get("locale", ""))
+        limit = int(args.get("limit", 10))
+        path = self.job.store.run_db_path(locale)
+        if not path.exists():
+            return f"error: no run DB for locale {locale!r}"
+        rows = RunDB(path).by_status("flagged", "mtpe")[:limit]
+        return json.dumps([{
+            "uid": r["uid"], "source": r["text"], "target": r["target"],
+            "domain": r["domain"], "reason": r["resolution"],
+            "findings": [f.message for f in r["findings"]]}
+            for r in rows], ensure_ascii=False)
+
+    # ------------------------------------------------------- file tools
+
+    def _confine(self, raw: str) -> Path:
+        """File tools may only see the project folder (the parent of the
+        jobs root) — a tool boundary, not a prompt rule."""
+        project_root = self.job.store.root.resolve().parent
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            # relative paths are relative to the PROJECT folder, and "../"
+            # prefixes operators habitually copy from the jobs root are
+            # tolerated (confinement below still applies)
+            candidate = project_root / re.sub(r"^(\.\./)+", "",
+                                              raw.lstrip("/"))
+        path = candidate.resolve()
+        if not path.is_relative_to(project_root):
+            raise ValueError(f"path is outside the project folder "
+                             f"({project_root})")
+        return path
+
+    def _t_list_files(self, args: dict) -> str:
+        directory = self._confine(str(args.get("dir", "")))
+        if not directory.is_dir():
+            return f"error: not a directory: {directory}"
+        entries = [(p.name + "/" if p.is_dir() else
+                    f"{p.name} ({p.stat().st_size}B)")
+                   for p in sorted(directory.iterdir())
+                   if p.name not in (".DS_Store",)]
+        return json.dumps(entries[:60], ensure_ascii=False)
+
+    def _t_inspect_file(self, args: dict) -> str:
+        path = self._confine(str(args.get("path", "")))
+        raw = path.read_bytes()
+        info: Dict[str, object] = {"file": path.name, "bytes": len(raw)}
+        if path.suffix.lower() == ".po":
+            from .exports import read_po_entries
+            entries = read_po_entries(path)
+            filled = sum(1 for _, _, t, _ in entries if t.strip())
+            info.update(entries=len(entries), msgstr_filled=filled,
+                        sample=[{"key": k[:16], "msgid": s[:60],
+                                 "msgstr": t[:60]}
+                                for k, s, t, _ in entries[:3]])
+        else:
+            # Text peek. The old flat 800-byte cap silently hid the tail of
+            # every generated report (a compare .md is ~5KB, its .json
+            # ~30KB), so a model asked "which entry?" saw only the summary
+            # header and had to guess. ``offset``/``limit`` let it page to
+            # the answer instead, and ``truncated`` says so out loud —
+            # unreported truncation is what turns a partial read into a
+            # confident wrong claim.
+            text = raw.decode("utf-8-sig", "replace")
+            offset = max(0, int(args.get("offset") or 0))
+            limit = int(args.get("limit") or INSPECT_TEXT_LIMIT)
+            limit = max(1, min(limit, INSPECT_TEXT_MAX))
+            chunk = text[offset:offset + limit]
+            info.update(chars=len(text), offset=offset, head=chunk)
+            end = offset + len(chunk)
+            if end < len(text):
+                info["truncated"] = True
+                info["next_offset"] = end
+                info["remaining_chars"] = len(text) - end
+        return json.dumps(info, ensure_ascii=False)
+
+    def _t_standardize(self, args: dict) -> str:
+        from .exports import emit_bilingual_jsonl, emit_flat_json
+        from .ingest import ingest_any
+        from .schemas import IntakeBrief
+        files = [self._confine(str(f)) for f in args.get("files", [])]
+        output = str(args.get("output", ""))
+        if not files:
+            return "error: no files given"
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        out_dir = self.job.store.job_dir / "exports"
+        if output == "source_json":
+            name = str(args.get("out_name") or "strings")
+            if not name.endswith(".json"):
+                name += ".json"
+            out = out_dir / name
+            fallback = self.job._adapter_fallback(self.provider,
+                                                  self.dry_run)
+            records = []
+            for file in files:
+                records.extend(ingest_any(file, fallback=fallback))
+            count = emit_flat_json(records, out)
+            return json.dumps({"written": count, "path": str(out)})
+        if output == "bilingual_jsonl":
+            locale = str(args.get("target_lang")
+                         or intake.target_locales[0])
+            name = str(args.get("out_name")
+                       or f"pairs_{intake.source_lang}-{locale}")
+            if not name.endswith(".jsonl"):
+                name += ".jsonl"
+            out = out_dir / name
+            written, empty = emit_bilingual_jsonl(
+                files, out, source_lang=intake.source_lang,
+                target_lang=locale)
+            return json.dumps({"written": written,
+                               "empty_targets_included": empty,
+                               "path": str(out)})
+        return (f"error: unknown output {output!r}; use source_json or "
+                f"bilingual_jsonl")
+
+    def _t_update_glossary(self, args: dict) -> str:
+        from .glossary_update import (TermDecision, load_decisions_xlsx,
+                                      refresh_glossary,
+                                      write_update_outputs)
+        assets = self._confine(str(args.get("assets", "")))
+        pe_po = self._confine(str(args.get("pe_po", "")))
+        out_dir = self._confine(str(args.get("out_dir", "")))
+        decisions = (load_decisions_xlsx(
+            self._confine(str(args["decisions"])))
+            if args.get("decisions") else [])
+        for zh, en in dict(args.get("terms") or {}).items():
+            decisions.append(TermDecision(zh=str(zh), en=str(en)))
+        result = refresh_glossary(assets, pe_po, decisions)
+        md = write_update_outputs(result, out_dir, assets)
+        distilled = {}
+        if args.get("distill"):
+            from .glossary_update import (distill_term_glossary,
+                                          write_term_glossary)
+            zh_asset = json.loads(
+                (Path(assets) / "zh_asset.json").read_text("utf-8"))
+            glossary, ties = distill_term_glossary(
+                zh_asset, result.updated_en, decisions)
+            path = write_term_glossary(glossary, ties, out_dir)
+            distilled = {"terms_xlsx": str(path),
+                         "terms_total": len(glossary["terms"]),
+                         "terms_locked":
+                             glossary["metadata"]["locked_terms"],
+                         "ties_excluded": len(ties)}
+        return json.dumps(
+            {"counts": result.counts(), "audit": str(md),
+             **({"distilled": distilled} if distilled else {}),
+             "review_xlsx": str(Path(str(out_dir))
+                                / "glossary_review.xlsx"),
+             "conflicts_open": result.conflicts_open[:8],
+             "term_violations": result.term_violations[:8],
+             "suggestions": result.suggestions[:8]}, ensure_ascii=False)
+
+    def _t_translate_po(self, args: dict) -> str:
+        from .llm import OpenAICompatProvider, autoload_env
+        from .po_translate import translate_untranslated
+        autoload_env()
+        provider = OpenAICompatProvider("deepseek")
+        from .project_paths import resolve_glossary
+        po_path = self._confine(str(args.get("po", "")))
+        glossary, notes = resolve_glossary(
+            hint=(self._confine(str(args["glossary"]))
+                  if args.get("glossary") else None),
+            start=po_path)
+        if glossary is None:
+            return json.dumps({"error": "no glossary resolved",
+                               "notes": notes}, ensure_ascii=False)
+        run = translate_untranslated(
+            po_path, glossary,
+            self._confine(str(args.get("out_dir", ""))),
+            provider=provider, game=str(args.get("game", "")),
+            locale=str(args.get("locale", "en")),
+            batch_size=int(args.get("batch_size", 12)),
+            reuse_from=(self._confine(str(args["reuse_from"]))
+                        if args.get("reuse_from") else None))
+        return json.dumps(
+            {"glossary_used": str(glossary), "glossary_notes": notes,
+             "entries_total": run.total, "untranslated": run.todo,
+             "reused": len(run.reused),
+             "prefilled": len(run.prefilled),
+             "translated": len(run.translated),
+             "repaired": run.repaired,
+             "violations": run.violations[:10],
+             "tokens_spent": run.tokens, "sanity_format": run.sanity,
+             "mtpe_form": str(Path(str(args.get("out_dir", "")))
+                              / "mtpe_form.xlsx")}, ensure_ascii=False)
+
+    def _t_scan_po(self, args: dict) -> str:
+        from .po_scan import scan_po
+        from .project_paths import resolve_glossary
+        po_path = self._confine(str(args.get("po", "")))
+        glossary, notes = resolve_glossary(
+            hint=(self._confine(str(args["glossary"]))
+                  if args.get("glossary") else None),
+            start=po_path)
+        deterministic = bool(args.get("deterministic_only"))
+        provider = None if (deterministic or self.dry_run) else (
+            self.provider_factory(str(args.get("locale", "en")))
+            if self.provider_factory else self.provider)
+        result = scan_po(
+            po_path, glossary,
+            self._confine(str(args.get("out_dir", ""))),
+            provider=provider, game=str(args.get("game", "")),
+            locale=str(args.get("locale", "en")),
+            source_lang=str(args.get("source_lang", "zh-CN")),
+            deterministic_only=deterministic or provider is None)
+        report = result.report
+        return json.dumps(
+            {"glossary_used": str(glossary) if glossary else None,
+             "glossary_notes": notes,
+             "checked": report.checked,
+             "flagged_strings": report.flagged_strings,
+             "findings_total": report.findings_total,
+             "by_severity": report.by_severity,
+             "by_bug_type": report.by_bug_type,
+             "cascade_ledger": report.cascade_ledger,
+             "block_ship": report.block_ship,
+             "inconsistent_sources": len(result.inconsistent),
+             "suggestions": len(result.suggestions),
+             **result.outputs}, ensure_ascii=False)
+
+    def _t_add_glossary_terms(self, args: dict) -> str:
+        from datetime import datetime
+        from .glossary_edit import TermEdit, edit_glossary_file
+        edits = [TermEdit(zh=str(zh), en=str(en))
+                 for zh, en in dict(args.get("terms") or {}).items()]
+        if not edits:
+            return "error: no terms given"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M")
+        _g, result, backup = edit_glossary_file(
+            self._confine(str(args.get("glossary", ""))), edits,
+            origin=str(args.get("origin")
+                       or f"operator {datetime.now():%Y-%m-%d}"),
+            force=bool(args.get("force")), backup_stamp=stamp)
+        return json.dumps(
+            {"added": result.added, "aliased": result.aliased,
+             "overwritten": result.overwritten,
+             "retired": result.retired, "unchanged": result.unchanged,
+             "conflicts": result.conflicts, "flagged": result.flagged,
+             "backup": str(backup) if backup else None},
+            ensure_ascii=False)
+
+    def _t_extract_glossary(self, args: dict) -> str:
+        from .glossary_update import TermDecision, load_decisions_xlsx
+        from .term_extract import (extract_glossary,
+                                   write_extraction_outputs)
+        po_paths = [self._confine(str(p))
+                    for p in (args.get("po") or [])]
+        out_dir = self._confine(str(args.get("out_dir", "")))
+        decisions = (load_decisions_xlsx(
+            self._confine(str(args["decisions"])))
+            if args.get("decisions") else [])
+        for zh, en in dict(args.get("terms") or {}).items():
+            decisions.append(TermDecision(zh=str(zh), en=str(en)))
+        provider = None
+        if args.get("llm_filter"):
+            from .llm import OpenAICompatProvider, autoload_env
+            autoload_env()
+            provider = OpenAICompatProvider("deepseek")
+        result = extract_glossary(
+            po_paths, decisions, provider=provider,
+            min_freq=int(args.get("min_freq", 3)),
+            game=str(args.get("game", "")),
+            locale=str(args.get("locale", "en")))
+        write_extraction_outputs(result, out_dir)
+        return json.dumps(
+            {"stats": result.stats,
+             "review_xlsx": str(Path(str(out_dir))
+                                / "extract_review.xlsx"),
+             "glossary_json": str(Path(str(out_dir))
+                                  / "glossary_terms.json"),
+             "conflicts": result.conflicts[:8],
+             "violations": result.violations[:8],
+             "needs_en": result.needs_en[:8]}, ensure_ascii=False)
+
+    def _t_compare_po(self, args: dict) -> str:
+        from .po_compare import compare_po, write_compare_report
+        old = self._confine(str(args.get("old", "")))
+        new = self._confine(str(args.get("new", "")))
+        result = compare_po(old, new)
+        payload = {"counts": result.counts(),
+                   "needs_attention": result.needs_attention,
+                   "translation_lost": result.translation_lost[:10],
+                   # EVERY source edit, not only the stale ones. A count
+                   # with no keys cannot answer "which entry changed?" —
+                   # the model is left to hunt the report file on disk and
+                   # guess, which is how a correct answer ends up
+                   # indefensible.
+                   "source_changed": result.source_changed[:10],
+                   "stale_translations": [
+                       e for e in result.source_changed
+                       if e.get("stale")][:10],
+                   "work_summary": result.work_summary()}
+        if args.get("out_dir"):
+            md = write_compare_report(
+                result, self._confine(str(args["out_dir"])))
+            payload["report"] = str(md)
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _t_deliver_po(self, args: dict) -> str:
+        from .memory import TranslationMemory
+        from .po_patch import deliver_from_review
+        review = self._confine(str(args.get("review", "")))
+        po_files = [self._confine(str(f))
+                    for f in args.get("po_files", [])]
+        if not po_files:
+            return "error: no po_files given"
+        project_root = self.job.store.root.resolve().parent
+        out_dir = (self._confine(str(args["out_dir"]))
+                   if args.get("out_dir")
+                   else project_root / "30-deliverables")
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        report = deliver_from_review(
+            review, po_files, out_dir,
+            timestamp=(str(args["timestamp"])
+                       if args.get("timestamp") else None),
+            tm=TranslationMemory(self.job.store.tm_path()),
+            locale=intake.target_locales[0])
+        return json.dumps(
+            {"counts": report.counts(), "outputs": report.outputs,
+             "report": f"{report.delivery_dir}/DELIVERY_REPORT.md",
+             "blocked": report.blocked,
+             "sanity": {name: {"verdict": r["verdict"],
+                               "errors": r["error_details"][:5]}
+                        for name, r in report.sanity.items()},
+             "relabeled": report.relabeled,
+             "undecided": report.undecided[:10],
+             "unmatched": report.unmatched[:10],
+             "conflicts": report.conflicts[:10],
+             "inconsistent": report.inconsistent[:10]}, ensure_ascii=False)
+
+    def _t_analyze(self, args: dict) -> str:
+        from .analysis import analyze_corpus, labels_from_run_dbs
+        from .ingest import ingest_any
+        files = [self._confine(str(f)) for f in args.get("files", [])]
+        if not files:
+            return "error: no files given"
+        fallback = self.job._adapter_fallback(self.provider, self.dry_run)
+        records = []
+        for file in files:
+            records.extend(ingest_any(file, fallback=fallback))
+        labels = labels_from_run_dbs(self.job.store.job_dir / "runs")
+        provider = (self.provider if args.get("classify")
+                    and not self.dry_run else None)
+        report = analyze_corpus(records, labels=labels, provider=provider)
+        return report.model_dump_json()
+
+    # -------------------------------------------------------------- loop
+
+    def _transcript(self, user_msg: str) -> str:
+        lines = []
+        for role, text in self.history[-30:]:
+            lines.append(f"[{role}] {text}")
+        lines.append(f"[operator] {user_msg}")
+        lines.append("Next step — ONE JSON tool call:")
+        return "\n".join(lines)
+
+    def _trace(self, event: str, **fields) -> None:
+        """Append one JSONL record to the session trace. The trace is the
+        debugging surface: what the model decided, with which arguments,
+        and what the tool actually returned — never truncated the way the
+        on_action console line is."""
+        record = {"ts": datetime.now(timezone.utc).isoformat(
+            timespec="seconds"), "turn": self.turn_no, "event": event,
+            **fields}
+        self.trace.append(record)
+        if self.trace_path is None:
+            return
+        try:
+            self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.trace_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False,
+                                        default=str) + "\n")
+        except OSError:
+            pass                    # tracing must never break a session
+
+    def turn(self, user_msg: str) -> str:
+        """One operator message → tool calls → one reply."""
+        self.turn_no += 1
+        self._trace("operator", message=user_msg)
+        tools = {"status": self._t_status, "next_step": self._t_next_step,
+                 "approve": self._t_approve,
+                 "read_artifact": self._t_read_artifact,
+                 "list_artifacts": self._t_list_artifacts,
+                 "flagged": self._t_flagged,
+                 "list_files": self._t_list_files,
+                 "inspect_file": self._t_inspect_file,
+                 "standardize": self._t_standardize,
+                 "analyze": self._t_analyze,
+                 "compare_po": self._t_compare_po,
+                 "deliver_po": self._t_deliver_po,
+                 "update_glossary": self._t_update_glossary,
+                 "extract_glossary": self._t_extract_glossary,
+                 "add_glossary_terms": self._t_add_glossary_terms,
+                 "translate_po": self._t_translate_po,
+                 "scan_po": self._t_scan_po}
+        pending_user = user_msg
+        for _ in range(MAX_STEPS_PER_TURN):
+            self.on_start("(thinking)", {})
+            think_started = time.monotonic()
+            call = complete_json(self.provider, SYSTEM,
+                                 self._transcript(pending_user), ToolCall,
+                                 temperature=0.0, max_tokens=1200)
+            self._trace("decide", tool=call.tool, args=call.args,
+                        seconds=round(time.monotonic() - think_started, 2))
+            if call.tool == "respond":
+                reply = call.message or "(empty reply)"
+                self.history.append(("operator", user_msg))
+                self.history.append(("orbit8", reply))
+                self._trace("respond", message=reply)
+                return reply
+            handler = tools.get(call.tool)
+            started = time.monotonic()
+            failed = None
+            self._trace("tool_start", tool=call.tool, args=call.args)
+            self.on_start(call.tool, call.args)
+            if handler is None:
+                observation = (f"error: unknown tool {call.tool!r}; "
+                               f"valid: {sorted(tools)} or respond")
+                failed = "unknown tool"
+            else:
+                try:
+                    observation = handler(call.args)
+                except Exception as err:       # tool errors are data, not crashes
+                    observation = f"error: {err}"
+                    failed = f"{type(err).__name__}: {err}"
+            self._trace("tool", tool=call.tool, args=call.args,
+                        result=observation, error=failed,
+                        seconds=round(time.monotonic() - started, 2))
+            # Say so when the tail is dropped. A silently clipped
+            # observation is indistinguishable from a complete one, which
+            # is how a model ends up describing content it never received.
+            if len(observation) > OBSERVATION_LIMIT:
+                observation = (
+                    observation[:OBSERVATION_LIMIT]
+                    + f"\n…[truncated: {len(observation) - OBSERVATION_LIMIT}"
+                      f" more chars of this result were NOT shown. Do not "
+                      f"describe what is not visible above; narrow the "
+                      f"request or page with offset/limit.]")
+            self.on_action(call.tool, observation)
+            self.history.append(
+                ("tool", f"{call.tool}({json.dumps(call.args, default=str)})"
+                         f" -> {observation}"))
+        self.history.append(("operator", user_msg))
+        reply = ("I hit the per-turn step limit before finishing — the job "
+                 "state is unchanged beyond the steps shown above. Ask me "
+                 "to continue if you want more.")
+        self.history.append(("orbit8", reply))
+        return reply

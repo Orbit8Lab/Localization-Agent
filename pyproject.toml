@@ -1,0 +1,29 @@
+[project]
+name = "orbit8-agent"
+version = "0.1.0"
+description = "Orbit8 localization agent — LangGraph stage executors under a deterministic Job Controller (8 stages / 6 gates)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langgraph>=0.4",
+    "pydantic>=2.7",
+    "openai>=1.40",
+    "openpyxl>=3.1.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+orbit8 = "orbit8.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "orbit8"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

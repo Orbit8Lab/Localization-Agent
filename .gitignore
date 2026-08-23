@@ -1,0 +1,89 @@
+# Pre-publication history, kept locally only: those commits still carry
+# client project names and the operator's Drive path.
+.git.old/
+
+# ---------------------------------------------------------------- secrets
+.ENV
+.env
+*.env
+.envrc
+*.key
+*.pem
+credentials*.json
+service-account*.json
+
+# ------------------------------------------------- local tool / IDE state
+# settings.local.json records allow-listed PATHS, which on this machine
+# name client projects and the operator's Drive account — never publish it.
+.claude/
+.vscode/
+.idea/
+*.code-workspace
+
+# ------------------------------------------------------------ environments
+.venv/
+venv/
+env/
+.python-version
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ------------------------------------------------------------ client data
+# Nothing derived from a client asset belongs in this repo. Job trees,
+# glossaries, PE forms, bug reports and .po drops all live in the Drive
+# project workspace (docs/STANDARDS.md), not in version control.
+jobs/
+tenants/
+10-received/
+20-work/
+30-deliverables/
+40-reference/
+90-temp/
+*.po
+*.pot
+*.mo
+*.xlsx
+*.xls
+*.csv
+*.tmx
+*.tbx
+glossary*.json
+*_asset.json
+dedup_index.json
+chat-traces/
+*.jsonl
+
+# ------------------------------------------- internal / client-identifying
+# Working documents that describe the client workspace itself: the Drive
+# account path, per-project folder layouts, and conference decks naming
+# real titles. Not needed to build or run the package.
+docs/STANDARDS.md
+docs/presentation/
+
+# ----------------------------------------------------------- large / binary
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+*.mp4
+*.mov
+*.wav
+*.psd
+*.sqlite
+*.db
+
+# ------------------------------------------------------------------- OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
