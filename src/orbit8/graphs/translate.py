@@ -111,7 +111,6 @@ class StageContext:
     # identically — this layer must be impossible to depend on.
     observations: Optional[ObservationLog] = None
     attempt: int = 1                   # the s4 attempt these rows belong to
-    store_revision: int = 0
 
 
 def build_translate_graph(ctx: StageContext):
@@ -275,7 +274,6 @@ def build_translate_graph(ctx: StageContext):
                 job_id=state.get("job_id", ""),
                 locale=cfg.locale,
                 attempt=ctx.attempt,
-                revision=ctx.store_revision,
                 batch_id=state.get("batch_id"),
                 uid=uid,
                 # Signatures of what is STILL WRONG with this candidate —

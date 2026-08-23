@@ -145,6 +145,57 @@ def test_an_unobserved_string_is_not_given_a_fabricated_verdict(job: Job):
         assert after.for_uid(uid) == []
 
 
+@pytest.fixture()
+def multi_locale_job(tmp_path: Path) -> Job:
+    """Two target locales. Every other fixture in this suite uses one, which
+    is exactly why the uid-collision bug below was invisible: `uid` hashes
+    the SOURCE string, so it only collides once a second locale exists."""
+    source = tmp_path / "strings.json"
+    source.write_text(json.dumps(SOURCE, ensure_ascii=False),
+                      encoding="utf-8")
+    intake = IntakeBrief(game="ExampleGame", source_lang="zh",
+                         target_locales=["ko", "ja"], genre=["werewolf"],
+                         client_lang="zh-CN")
+    return Job.init(tmp_path / "jobs", "multi", intake=intake,
+                    source_files=[str(source)], pilot_size=2)
+
+
+def test_an_edit_in_one_locale_does_not_mark_the_other(multi_locale_job: Job):
+    """The observation DB is job-scoped while RunDBs are per-locale, so a
+    verdict keyed on uid alone stamped every locale. In a 5-locale job that
+    would fabricate 80% of the human-agreement signal — the one input PLAN
+    §5.6 insists must not be synthesized."""
+    job = multi_locale_job
+    _walk_to_g3(job)
+
+    ja_db = job._run_db("ja")
+    flagged = ja_db.by_status("flagged", "mtpe")
+    assert flagged, "fixture produced no reviewable ja strings"
+    uid = flagged[0]["uid"]
+    # the reviewer rewrites ONLY the Japanese string
+    ja_db.record(uid, status=flagged[0]["status"], target="日本語の修正")
+
+    job.approve("G3", by="pm")
+
+    log = ObservationLog(job.store.observations_path())
+    ja_rows = log.for_uid(uid, "ja")
+    ko_rows = log.for_uid(uid, "ko")
+    assert ja_rows and {r["g3_verdict"] for r in ja_rows} == {G3_EDITED}
+    # ...and the Korean row must not inherit the ruling OR the Japanese text
+    assert ko_rows
+    assert all(r["g3_verdict"] != G3_EDITED for r in ko_rows)
+    assert all(r["g3_text"] != "日本語の修正" for r in ko_rows)
+
+
+def test_both_locales_are_observed_separately(multi_locale_job: Job):
+    """Same source string, two locales, two independent rows — otherwise
+    per-locale utility can never be computed."""
+    job = multi_locale_job
+    _walk_to_g3(job)
+    log = ObservationLog(job.store.observations_path())
+    assert {r["locale"] for r in log.all_rows()} == {"ko", "ja"}
+
+
 def test_g3_approval_still_absorbs_the_queue(job: Job):
     """The observation write is additive: the pre-existing G3 behavior —
     flagged rows accepted, pairs written back to the TM — is unchanged."""

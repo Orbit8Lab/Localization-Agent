@@ -132,10 +132,15 @@ def signatures(findings: Sequence[Finding]) -> List[str]:
 class Observation:
     """One candidate evaluation at the ratchet.
 
-    `job_id`/`attempt`/`revision` are the versioning coordinates PLAN §5.7
-    requires: an observation that cannot be tied back to the attempt that
-    produced it is not auditable, and the store state behind `attempt-01`
-    is otherwise unrecoverable.
+    `job_id`/`attempt` tie a row to the s4 attempt that produced it: an
+    observation that cannot be traced back to its attempt is not auditable.
+
+    PLAN §5.7 also asks for a STORE REVISION, and it is deliberately absent
+    here. A revision is only meaningful once retrieved store content can
+    influence a prompt (§5.3) — that is Phase 4. In Phase 1 nothing reads
+    the store, so there is no revision to record, and a column that always
+    held 0 would advertise an audit coordinate it did not have. Phase 4
+    adds it together with the monotonic counter that gives it a value.
     """
     job_id: str
     locale: str
@@ -154,7 +159,6 @@ class Observation:
     target: Optional[str] = None
     tokens: float = 0.0
     fingerprint: Optional[str] = None
-    revision: int = 0
     batch_id: Optional[str] = None
     # Filled in later, when a human rules at G3 (PLAN §5.6). Kept on the
     # same row so a skill's utility is one query, not a join across a
@@ -185,7 +189,6 @@ class ObservationLog:
                 job_id TEXT NOT NULL,
                 locale TEXT NOT NULL,
                 attempt INTEGER NOT NULL,
-                revision INTEGER NOT NULL DEFAULT 0,
                 batch_id TEXT,
                 uid TEXT NOT NULL,
                 signatures_json TEXT NOT NULL,
@@ -220,12 +223,12 @@ class ObservationLog:
     def record(self, obs: Observation) -> int:
         cur = self.conn.execute(
             "INSERT INTO observations (schema_version, job_id, locale, "
-            "attempt, revision, batch_id, uid, signatures_json, strategy, "
+            "attempt, batch_id, uid, signatures_json, strategy, "
             "iteration, badness_before, badness_after, verdict, target, "
             "tokens, fingerprint, g3_verdict) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (SCHEMA_VERSION, obs.job_id, obs.locale, obs.attempt,
-             obs.revision, obs.batch_id, obs.uid,
+             obs.batch_id, obs.uid,
              json.dumps(obs.signatures, ensure_ascii=False), obs.strategy,
              obs.iteration, obs.badness_before, obs.badness_after,
              obs.verdict, obs.target, obs.tokens, obs.fingerprint,
@@ -239,20 +242,31 @@ class ObservationLog:
         self.conn.commit()
         return obs_id
 
-    def record_g3(self, uid: str, verdict: str,
+    def record_g3(self, uid: str, locale: str, verdict: str,
                   text: Optional[str] = None) -> int:
-        """Attach a human verdict to every observation of one string.
+        """Attach a human verdict to every observation of one string in one
+        LOCALE.
 
         This is the only UPDATE the log permits, and it is not a revision:
         the G3 ruling is a NEW fact about an existing observation that did
         not exist when the row was written. Without it, every downstream
         utility estimate is our own scorer grading itself (PLAN §5.6).
+
+        `locale` is mandatory and NOT defaulted. `uid` is the dedup hash of
+        the SOURCE string, so it is identical across every target locale,
+        while this log is job-scoped (one file, all locales). Keying on uid
+        alone stamped a reviewer's ruling — and their translated text —
+        onto every other locale's row: a reviewer editing the Japanese
+        string marked the Korean one `edited` and overwrote its `g3_text`
+        with Japanese. Since the G3 verdict is the only held-out human
+        signal in the design, that fabricated agreement data in the one
+        place the plan requires it be real.
         """
         if verdict not in (G3_PENDING, G3_ACCEPTED, G3_EDITED, G3_REJECTED):
             raise ValueError(f"unknown G3 verdict: {verdict!r}")
         cur = self.conn.execute(
             "UPDATE observations SET g3_verdict = ?, g3_text = ? "
-            "WHERE uid = ?", (verdict, text, uid))
+            "WHERE uid = ? AND locale = ?", (verdict, text, uid, locale))
         self.conn.commit()
         return cur.rowcount
 
@@ -262,10 +276,17 @@ class ObservationLog:
         return [self._row(r) for r in self.conn.execute(
             "SELECT * FROM observations ORDER BY id").fetchall()]
 
-    def for_uid(self, uid: str) -> List[dict]:
+    def for_uid(self, uid: str, locale: Optional[str] = None) -> List[dict]:
+        """Observations of one string. Pass `locale` whenever the answer
+        feeds a per-locale decision — a bare uid spans every locale in the
+        job, because uid hashes the SOURCE text (see `record_g3`)."""
+        if locale is None:
+            return [self._row(r) for r in self.conn.execute(
+                "SELECT * FROM observations WHERE uid = ? ORDER BY id",
+                (uid,)).fetchall()]
         return [self._row(r) for r in self.conn.execute(
-            "SELECT * FROM observations WHERE uid = ? ORDER BY id",
-            (uid,)).fetchall()]
+            "SELECT * FROM observations WHERE uid = ? AND locale = ? "
+            "ORDER BY id", (uid, locale)).fetchall()]
 
     def for_signature(self, sig: str) -> List[dict]:
         return [self._row(r) for r in self.conn.execute(

@@ -80,7 +80,7 @@ Two ordering notes that matter more than the table:
 
 > **STATUS: BUILT.** `src/orbit8/observation.py`, wired into
 > `graphs/translate.py::gate` and `controller.py::_absorb_flagged`,
-> readable via `orbit8 observations <root> <job>`. 336 tests pass.
+> readable via `orbit8 observations <root> <job>`. 343 tests pass.
 > What implementing it taught is recorded in §3.1 — including one live
 > ratchet bug it exposed.
 
@@ -164,6 +164,26 @@ A fabricated `accepted` would look like human endorsement forever.
 G3, and they mean opposite-facing things: our gate's opinion versus the
 human's. Telling them apart is the entire point of §5.6, so they are
 separate constant sets and the comparison is explicit.
+
+**`uid` is not a per-locale key** — found in review, after the first
+implementation shipped it wrong. `uid` hashes the SOURCE string, so it is
+identical across every target locale, while the observation log is
+job-scoped (one file, all locales). Keying the G3 verdict on `uid` alone
+stamped one reviewer's ruling — and their translated text — onto every
+other locale: an editor fixing the Japanese string marked the Korean row
+`edited` and overwrote its `g3_text` with Japanese. In a 5-locale job that
+fabricates 80% of the agreement data, in the one place §5.6 requires it be
+real. `record_g3` now takes a mandatory `locale`; `for_uid` takes an
+optional one. Worth recording *why* it slipped: every test fixture used a
+single target locale, so the bug was structurally invisible to the suite
+that was meant to cover it.
+
+**The store revision is deliberately absent.** §5.7 asks for it, and
+Phase 1 does not record one: nothing here reads the store, so the column
+could only ever hold `0` — advertising an audit coordinate it does not
+have. Phase 4 adds it together with the monotonic counter that gives it a
+value, since that is when retrieved store content starts influencing
+prompts (§5.3). A test pins the absence so it returns on purpose.
 
 ---
 

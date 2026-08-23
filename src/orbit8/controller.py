@@ -466,17 +466,17 @@ class Job:
                 if row["target"]:
                     tm.store(row["text"], row["target"], locale,
                              origin="human")
-                verdict, text = self._g3_verdict(observations, row)
+                verdict, text = self._g3_verdict(observations, row, locale)
                 if verdict is not None:
-                    observations.record_g3(row["uid"], verdict, text)
+                    observations.record_g3(row["uid"], locale, verdict, text)
                 run_db.record(row["uid"], status="accepted",
                               resolution=row["resolution"] or "post-edited")
 
     @staticmethod
-    def _g3_verdict(observations: ObservationLog,
-                    row: dict) -> tuple[Optional[str], Optional[str]]:
-        """What the human decided about one string, or (None, None) when the
-        log cannot honestly tell.
+    def _g3_verdict(observations: ObservationLog, row: dict,
+                    locale: str) -> tuple[Optional[str], Optional[str]]:
+        """What the human decided about one string in one locale, or
+        (None, None) when the log cannot honestly tell.
 
         A row is `edited` when the approved target differs from the best
         candidate S4 recorded, `accepted` when it is unchanged. Silence is
@@ -485,8 +485,13 @@ class Job:
         of agreement when there is no observation to compare against. A
         fabricated `accepted` would be worse than no data — it would look
         like human endorsement to every later utility estimate (PLAN §5.6).
+
+        `locale` is required for the same reason `record_g3` requires it:
+        `row["uid"]` hashes the source string, so it matches every locale.
+        Without it, the diff below could compare a Korean approval against
+        a Japanese candidate and call the result an edit.
         """
-        prior = observations.for_uid(row["uid"])
+        prior = observations.for_uid(row["uid"], locale)
         if not prior:
             return None, None
         # The last candidate the RATCHET kept is what S4 handed to the

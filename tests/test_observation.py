@@ -154,12 +154,21 @@ def test_the_log_is_append_only(log):
     assert [r["badness_after"] for r in rows] == [100, 0]
 
 
-def test_attempt_and_revision_are_stamped(log):
+def test_the_attempt_is_stamped(log):
     """PLAN §5.7: an observation that cannot be tied to the attempt that
     produced it is not auditable."""
-    log.record(_obs(attempt=3, revision=7))
-    row, = log.all_rows()
-    assert row["attempt"] == 3 and row["revision"] == 7
+    log.record(_obs(attempt=3))
+    assert log.all_rows()[0]["attempt"] == 3
+
+
+def test_there_is_no_store_revision_column(log):
+    """PLAN §5.7 also asks for a store revision, and Phase 1 deliberately
+    omits it: nothing here reads the store, so the column could only ever
+    hold 0 — advertising an audit coordinate it does not have. Phase 4 adds
+    it alongside the counter that gives it a value. Pinned so it comes back
+    on purpose rather than as a silently-zero field."""
+    log.record(_obs())
+    assert "revision" not in log.all_rows()[0]
 
 
 def test_rows_are_queryable_by_signature(log):
@@ -210,15 +219,63 @@ def test_a_g3_verdict_attaches_to_every_observation_of_the_string(log):
     log.record(_obs(verdict=REJECTED, strategy="repair"))
     log.record(_obs(uid="other-uid"))
 
-    assert log.record_g3("uid-1", G3_EDITED, "Soulstone") == 2
+    assert log.record_g3("uid-1", "en", G3_EDITED, "Soulstone") == 2
     assert {r["g3_verdict"] for r in log.for_uid("uid-1")} == {G3_EDITED}
     assert log.for_uid("other-uid")[0]["g3_verdict"] == G3_PENDING
 
 
 def test_an_edit_keeps_what_the_human_actually_wrote(log):
     log.record(_obs())
-    log.record_g3("uid-1", G3_EDITED, "Soulstone")
+    log.record_g3("uid-1", "en", G3_EDITED, "Soulstone")
     assert log.all_rows()[0]["g3_text"] == "Soulstone"
+
+
+# ------------------------------------------ the multi-locale uid collision
+
+def test_a_ruling_in_one_locale_does_not_touch_another(log):
+    """`uid` hashes the SOURCE string, so it is identical across every
+    target locale, and this log is job-scoped — one file for all locales.
+    Keying a verdict on uid alone stamped one reviewer's ruling onto every
+    locale, which fabricated human-agreement data in the one place the
+    design says it must be real (PLAN §5.6)."""
+    log.record(_obs(uid="u1", locale="ko", target="시작"))
+    log.record(_obs(uid="u1", locale="ja", target="開始"))
+
+    assert log.record_g3("u1", "ja", G3_EDITED, "ゲーム開始") == 1
+
+    by_locale = {r["locale"]: r for r in log.all_rows()}
+    assert by_locale["ja"]["g3_verdict"] == G3_EDITED
+    assert by_locale["ko"]["g3_verdict"] == G3_PENDING
+
+
+def test_one_locales_translation_never_lands_on_another(log):
+    """The sharper half of the same bug: the ruling carried the reviewer's
+    TEXT, so Korean rows ended up holding Japanese strings."""
+    log.record(_obs(uid="u1", locale="ko", target="시작"))
+    log.record(_obs(uid="u1", locale="ja", target="開始"))
+    log.record_g3("u1", "ja", G3_EDITED, "ゲーム開始")
+
+    korean = next(r for r in log.all_rows() if r["locale"] == "ko")
+    assert korean["g3_text"] is None
+
+
+def test_for_uid_can_be_scoped_to_one_locale(log):
+    log.record(_obs(uid="u1", locale="ko"))
+    log.record(_obs(uid="u1", locale="ja"))
+    assert len(log.for_uid("u1")) == 2               # every locale
+    assert len(log.for_uid("u1", "ko")) == 1         # just this one
+
+
+def test_each_locale_can_be_ruled_on_independently(log):
+    """Two reviewers, two languages, two different conclusions about the
+    same source string — which is the normal case, not an edge case."""
+    log.record(_obs(uid="u1", locale="ko", target="시작"))
+    log.record(_obs(uid="u1", locale="ja", target="開始"))
+    log.record_g3("u1", "ko", G3_ACCEPTED)
+    log.record_g3("u1", "ja", G3_REJECTED)
+
+    by_locale = {r["locale"]: r["g3_verdict"] for r in log.all_rows()}
+    assert by_locale == {"ko": G3_ACCEPTED, "ja": G3_REJECTED}
 
 
 def test_an_unknown_g3_verdict_is_refused(log):
@@ -226,7 +283,7 @@ def test_an_unknown_g3_verdict_is_refused(log):
     computed downstream."""
     log.record(_obs())
     with pytest.raises(ValueError):
-        log.record_g3("uid-1", "looks-fine")
+        log.record_g3("uid-1", "en", "looks-fine")
 
 
 def test_the_tally_reports_agreement_and_overturns(log):
@@ -235,9 +292,9 @@ def test_the_tally_reports_agreement_and_overturns(log):
     log.record(_obs(uid="a"))
     log.record(_obs(uid="b"))
     log.record(_obs(uid="c"))
-    log.record_g3("a", G3_ACCEPTED)
-    log.record_g3("b", G3_EDITED, "better")
-    log.record_g3("c", G3_REJECTED)
+    log.record_g3("a", "en", G3_ACCEPTED)
+    log.record_g3("b", "en", G3_EDITED, "better")
+    log.record_g3("c", "en", G3_REJECTED)
 
     row, = log.signature_tally()
     assert row["g3_accepted"] == 1

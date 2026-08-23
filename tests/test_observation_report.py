@@ -81,9 +81,9 @@ def test_the_report_surfaces_g3_disagreement(tmp_path, capsys):
     for n in range(3):
         log.record(_obs(f"u{n}", "length/overflow", verdict=ACCEPTED,
                         badness_before=100, badness_after=0))
-    log.record_g3("u0", G3_EDITED, "shorter")
-    log.record_g3("u1", G3_EDITED, "shorter")
-    log.record_g3("u2", G3_ACCEPTED)
+    log.record_g3("u0", "ko", G3_EDITED, "shorter")
+    log.record_g3("u1", "ko", G3_EDITED, "shorter")
+    log.record_g3("u2", "ko", G3_ACCEPTED)
 
     main(["observations", str(job.store.root), "demo"])
     out = capsys.readouterr().out
@@ -97,7 +97,7 @@ def test_agreement_is_not_reported_as_disagreement(tmp_path, capsys):
     for n in range(3):
         log.record(_obs(f"u{n}", "terminology/魂石", verdict=ACCEPTED,
                         badness_before=100, badness_after=0))
-        log.record_g3(f"u{n}", G3_ACCEPTED)
+        log.record_g3(f"u{n}", "ko", G3_ACCEPTED)
 
     main(["observations", str(job.store.root), "demo"])
     assert "overturned by G3 more often" not in capsys.readouterr().out
