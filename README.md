@@ -9,7 +9,20 @@ mapped onto Localization Pipeline V2
 are ported from `../localization-pipeline` (`locpipe/agents.py`,
 `docs/agents/*.md` — those skill documents remain the source of truth).
 
+## The lifecycle
+
+Eight stages, six human gates. The defect loop is surgical and
+attempt-versioned; an incremental drop re-enters at S1 against locked
+assets.
+
+![Lifecycle stages and gates](docs/image/lifecycle-stages.svg)
+
 ## Architecture
+
+Three layers, split by what each is actually good at: humans decide, code
+controls, models judge — and the artifact tree is the only shared state.
+
+![Judgment vs. control — the three layers](docs/image/architecture-layers.svg)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -59,6 +72,24 @@ Key invariants (enforced in code, not prompts — design §7):
 - **Model fingerprints** (model id + prompt hash) ride every agent-produced
   envelope for six-weeks-later attribution and benchmark reproducibility.
 
+### Stage 4 — the critic finds defects, code decides when to stop
+
+`route` is a deterministic conditional edge. The three hard stops — the
+ratchet, the convergence rule, and the token budget — are all read in
+code, because the moment an agent can decide "good enough", cost has no
+ceiling.
+
+![Stage 4 translate loop](docs/image/translate-loop-slide.svg)
+
+### Stage 5 — LQA as a cost ladder
+
+Tiers run in sequence, cheapest first: T1 mechanical on everything, T2
+project-level consistency on what survives, T3 LLM semantic only on the
+remainder, then a second-layer verifier over T3's findings. Precision
+beats recall by a wide margin — studios abandon tooling that cries wolf.
+
+![LQA tier cascade](docs/image/lqa-cascade-slide.svg)
+
 ## Interface layer: chat orchestrator
 
 `orbit8 chat` puts a natural-language operator interface OVER the
@@ -76,6 +107,11 @@ you> 推进到下一个 gate，然后把 flagged 的字符串给我看看
 you> 没问题，通过 G2
 ```
 
+Plain language in, typed tool calls out — and when no tool fits, that is
+a visible gap rather than an improvised action.
+
+![Chat orchestrator routing plain language to typed tools](docs/image/agentic-orchestrator-slide.svg)
+
 ## Sandbox: agent-generated ingest adapters
 
 Unknown source formats no longer hard-fail. The **Adapter-Writer** agent
@@ -91,6 +127,20 @@ re-runs deterministically on later ingests (INCREMENTAL path) — generated
 once, audited, then frozen in behavior. Adversarial-grade isolation should
 add a container (`docker run --network none --read-only`) around the same
 entry point.
+
+Each job is its own sandbox on disk too: one customer's assets, TM and
+decision ledger cannot reach another's.
+
+![Sandbox and checkpoint design](docs/image/sandbox-checkpoint.svg)
+
+## Glossary + post-editing flywheel
+
+Terminology is the one asset that compounds. A human decision enters the
+ledger once, and from then on the deterministic gate enforces it on every
+string — which is also how AI-introduced bugs get collected rather than
+argued about.
+
+![Glossary and PE flywheel](docs/image/glossary-pe-loop.svg)
 
 ## Skill docs
 
@@ -120,8 +170,9 @@ uv run orbit8 status jobs demo-ko
 # $DEEPSEEK_API (auto-loaded from .ENV outside the repo, or $ORBIT8_ENV)
 uv run orbit8 next jobs demo-ko
 
-uv run pytest    # 30 tests incl. full INTAKE→RELEASE dry-run, sandbox,
-                 # codegen retry loop, and chat orchestrator
+uv run pytest    # 284 tests incl. full INTAKE→RELEASE dry-run, sandbox,
+                 # codegen retry loop, chat orchestrator, .po format
+                 # fidelity and display-width budgets
 ```
 
 ## v0 simplifications (deliberate, documented)

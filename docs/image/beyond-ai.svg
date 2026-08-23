@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <rect width="1200" height="675" fill="#ffffff"/>
+  <text x="48" y="56" font-size="30" font-weight="700" fill="#1f2937">More than an AI system</text>
+  <text x="48" y="86" font-size="17" fill="#6b7280">the parts a model can't be: management, measurement, and source-side intelligence</text>
+
+  <!-- Column 1: PM -->
+  <rect x="48" y="120" width="352" height="440" rx="14" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+  <text x="72" y="158" font-size="20" font-weight="700" fill="#b45309">Project manager</text>
+  <text x="72" y="182" font-size="14" fill="#92400e">the Controller runs the project, not just the pipeline</text>
+  <g font-size="14.5" fill="#78350f">
+    <rect x="72" y="200" width="304" height="56" rx="8" fill="#ffffff" stroke="#d97706"/>
+    <text x="88" y="224">Standardized workspaces — one skeleton</text>
+    <text x="88" y="244">per client; intake logged with SHA-256</text>
+    <rect x="72" y="268" width="304" height="56" rx="8" fill="#ffffff" stroke="#d97706"/>
+    <text x="88" y="292">Gate ledger G0–G5 — who approved what,</text>
+    <text x="88" y="312">when; deliverables tracked in PROJECT.md</text>
+    <rect x="72" y="336" width="304" height="56" rx="8" fill="#ffffff" stroke="#d97706"/>
+    <text x="88" y="360">WORKLOG index — every work folder, its</text>
+    <text x="88" y="380">status, and where its outputs went</text>
+    <rect x="72" y="404" width="304" height="56" rx="8" fill="#ffffff" stroke="#d97706"/>
+    <text x="88" y="428">Round-trip forms with due discipline —</text>
+    <text x="88" y="448">incomplete decisions reported, not guessed</text>
+    <rect x="72" y="472" width="304" height="56" rx="8" fill="#ffffff" stroke="#d97706"/>
+    <text x="88" y="496">Chat orchestrator — "帮我对比这两个PO"</text>
+    <text x="88" y="516">routes to typed, path-confined tools</text>
+  </g>
+
+  <!-- Column 2: analysis -->
+  <rect x="424" y="120" width="352" height="440" rx="14" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="448" y="158" font-size="20" font-weight="700" fill="#047857">Analysis module</text>
+  <text x="448" y="182" font-size="14" fill="#065f46">any ongoing progress, quantified on demand</text>
+  <g font-size="14.5" fill="#064e3b">
+    <rect x="448" y="200" width="304" height="56" rx="8" fill="#ffffff" stroke="#059669"/>
+    <text x="464" y="224">Drop-over-drop deltas — new / changed /</text>
+    <text x="464" y="244">lost strings, word-level, source AND target</text>
+    <rect x="448" y="268" width="304" height="56" rx="8" fill="#ffffff" stroke="#059669"/>
+    <text x="464" y="292">Work-basis numbers — "2,174 new source</text>
+    <text x="464" y="312">words; 22 stale translations to re-review"</text>
+    <rect x="448" y="336" width="304" height="56" rx="8" fill="#ffffff" stroke="#059669"/>
+    <text x="464" y="360">Cascade audits — LQA tier accounting</text>
+    <text x="464" y="380">reconciled before a report can exist</text>
+    <rect x="448" y="404" width="304" height="56" rx="8" fill="#ffffff" stroke="#059669"/>
+    <text x="464" y="428">Glossary deltas per round — locked /</text>
+    <text x="464" y="448">drifted / superseded / carried counts</text>
+    <rect x="448" y="472" width="304" height="56" rx="8" fill="#ffffff" stroke="#059669"/>
+    <text x="464" y="496">Corpus profile — strings, words,</text>
+    <text x="464" y="516">story-vs-instruction rollups per game</text>
+  </g>
+
+  <!-- Column 3: source analytics -->
+  <rect x="800" y="120" width="352" height="440" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="824" y="158" font-size="20" font-weight="700" fill="#1d4ed8">Source-language analytics</text>
+  <text x="824" y="182" font-size="14" fill="#1e40af">we QA the client's text, not just our translations</text>
+  <g font-size="14.5" fill="#1e3a8a">
+    <rect x="824" y="200" width="304" height="56" rx="8" fill="#ffffff" stroke="#2563eb"/>
+    <text x="840" y="224">Source-side inconsistencies — case and</text>
+    <text x="840" y="244">wording variants of the same string</text>
+    <rect x="824" y="268" width="304" height="56" rx="8" fill="#ffffff" stroke="#2563eb"/>
+    <text x="840" y="292">Rename tracking across drops — SAN值→</text>
+    <text x="840" y="312">精神值 chains recorded, never re-asked</text>
+    <rect x="824" y="336" width="304" height="56" rx="8" fill="#ffffff" stroke="#2563eb"/>
+    <text x="840" y="360">Template families &amp; placeholders —</text>
+    <text x="840" y="380">engine markup stripped before analysis</text>
+    <rect x="824" y="404" width="304" height="56" rx="8" fill="#ffffff" stroke="#2563eb"/>
+    <text x="840" y="428">Stale-translation detection — source</text>
+    <text x="840" y="448">changed, target didn't: flagged instantly</text>
+    <rect x="824" y="472" width="304" height="56" rx="8" fill="#ffffff" stroke="#2563eb"/>
+    <text x="840" y="496">Dev-query sheets — "cannot answer"</text>
+    <text x="840" y="516">decisions become tracked client questions</text>
+  </g>
+
+  <text x="48" y="608" font-size="16.5" font-weight="600" fill="#1f2937">Translation quality is table stakes. What clients keep is the operating system around it:</text>
+  <text x="48" y="632" font-size="16.5" font-weight="600" fill="#1f2937">a managed project, measurable progress, and a source text that gets healthier every drop.</text>
+</svg>

@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="q1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+
+  <text x="60" y="80" font-size="38" font-weight="700" fill="#1f2937">LQA is a cost ladder, not a review</text>
+
+  <!-- funnel bars -->
+  <rect x="120" y="150" width="620" height="94" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="152" y="196" font-size="26" font-weight="700" fill="#047857">T1 · mechanical</text>
+  <text x="152" y="228" font-size="20" fill="#064e3b">placeholders · length · punctuation</text>
+  <text x="770" y="206" font-size="22" font-weight="600" fill="#047857">code · everything</text>
+
+  <rect x="180" y="272" width="500" height="94" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="212" y="318" font-size="26" font-weight="700" fill="#047857">T2 · glossary</text>
+  <text x="212" y="350" font-size="20" fill="#064e3b">locked terms · consistency</text>
+  <text x="770" y="328" font-size="22" font-weight="600" fill="#047857">code · survivors</text>
+
+  <rect x="240" y="394" width="380" height="94" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="272" y="440" font-size="26" font-weight="700" fill="#1d4ed8">T3 · semantic</text>
+  <text x="272" y="472" font-size="20" fill="#1e3a8a">meaning · tone · voice</text>
+  <text x="770" y="450" font-size="22" font-weight="600" fill="#1d4ed8">LLM · what's left</text>
+
+  <rect x="300" y="516" width="260" height="80" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+  <text x="332" y="556" font-size="24" font-weight="700" fill="#b45309">VERIFIER</text>
+  <text x="332" y="584" font-size="19" fill="#78350f">confirm · overturn</text>
+  <text x="770" y="566" font-size="22" font-weight="600" fill="#b45309">second layer</text>
+
+  <!-- descending arrows -->
+  <g stroke="#475569" stroke-width="3">
+    <line x1="100" y1="197" x2="100" y2="319" marker-end="url(#q1)"/>
+    <line x1="100" y1="319" x2="100" y2="441" marker-end="url(#q1)"/>
+    <line x1="100" y1="441" x2="100" y2="556" marker-end="url(#q1)"/>
+  </g>
+
+  <text x="1010" y="330" font-size="24" font-weight="600" fill="#1f2937">Never spend a</text>
+  <text x="1010" y="366" font-size="24" font-weight="600" fill="#1f2937">model call on</text>
+  <text x="1010" y="402" font-size="24" font-weight="600" fill="#1f2937">what a regex</text>
+  <text x="1010" y="438" font-size="24" font-weight="600" fill="#1f2937">settles.</text>
+</svg>

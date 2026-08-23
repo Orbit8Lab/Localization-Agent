@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="o1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="o2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="o4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+
+  <text x="60" y="76" font-size="36" font-weight="700" fill="#1f2937">Plain language in. Typed tool calls out.</text>
+
+  <!-- row 1: operator, orchestrator, controller, tool -->
+
+  <!-- operator -->
+  <rect x="48" y="124" width="228" height="130" rx="14" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+  <text x="162" y="164" font-size="20" font-weight="700" text-anchor="middle" fill="#b45309">OPERATOR</text>
+  <text x="162" y="202" font-size="16" text-anchor="middle" fill="#78350f">“Compare these</text>
+  <text x="162" y="226" font-size="16" text-anchor="middle" fill="#78350f">two POs”</text>
+
+  <line x1="276" y1="189" x2="316" y2="189" stroke="#475569" stroke-width="3" marker-end="url(#o1)"/>
+
+  <!-- orchestrator: the agent loop, spelled out -->
+  <rect x="318" y="112" width="272" height="154" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="454" y="146" font-size="20" font-weight="700" text-anchor="middle" fill="#1d4ed8">ORCHESTRATOR</text>
+  <text x="340" y="180" font-size="15.5" fill="#1e3a8a">1 · read the request</text>
+  <text x="340" y="206" font-size="15.5" fill="#1e3a8a">2 · pick ONE tool</text>
+  <text x="340" y="232" font-size="15.5" fill="#1e3a8a">3 · read the result</text>
+  <text x="340" y="258" font-size="15.5" fill="#1e3a8a">4 · loop, or answer</text>
+
+  <line x1="590" y1="189" x2="630" y2="189" stroke="#2563eb" stroke-width="3" marker-end="url(#o2)"/>
+  <text x="610" y="96" font-size="14" text-anchor="middle" fill="#1d4ed8">one JSON tool call</text>
+
+  <!-- controller -->
+  <rect x="632" y="124" width="228" height="130" rx="14" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+  <text x="746" y="164" font-size="20" font-weight="700" text-anchor="middle" fill="#334155">JOB CONTROLLER</text>
+  <text x="746" y="200" font-size="15.5" text-anchor="middle" fill="#64748b">validates gate order</text>
+  <text x="746" y="226" font-size="15.5" text-anchor="middle" fill="#64748b">and path limits</text>
+
+  <line x1="860" y1="189" x2="900" y2="189" stroke="#475569" stroke-width="3" marker-end="url(#o1)"/>
+
+  <!-- tools (larger box, per request) -->
+  <rect x="902" y="106" width="250" height="166" rx="14" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="1027" y="142" font-size="20" font-weight="700" text-anchor="middle" fill="#047857">TOOL</text>
+  <g font-size="15" fill="#065f46" text-anchor="middle">
+    <rect x="920" y="158" width="214" height="32" rx="7" fill="#ffffff" stroke="#059669" stroke-width="2"/>
+    <text x="1027" y="180">extract glossary</text>
+    <rect x="920" y="196" width="214" height="32" rx="7" fill="#ffffff" stroke="#059669" stroke-width="2"/>
+    <text x="1027" y="218">translate</text>
+    <rect x="920" y="234" width="214" height="32" rx="7" fill="#ffffff" stroke="#059669" stroke-width="2"/>
+    <text x="1027" y="256">generate PE form</text>
+  </g>
+
+  <!-- result returns to the orchestrator -->
+  <path d="M 902 300 C 700 320 520 310 454 274" fill="none" stroke="#475569" stroke-width="3" stroke-dasharray="7 5" marker-end="url(#o1)"/>
+  <text x="560" y="334" font-size="15" text-anchor="middle" fill="#64748b">result → next decision</text>
+
+  <!-- no tool fits: the agent writes one -->
+  <rect x="902" y="352" width="250" height="128" rx="14" fill="#f5f3ff" stroke="#7c3aed" stroke-width="3"/>
+  <text x="1027" y="386" font-size="18" font-weight="700" text-anchor="middle" fill="#6d28d9">NO TOOL FITS?</text>
+  <text x="1027" y="416" font-size="15" text-anchor="middle" fill="#5b21b6">the agent writes one,</text>
+  <text x="1027" y="438" font-size="15" text-anchor="middle" fill="#5b21b6">runs it in a sandbox,</text>
+  <text x="1027" y="460" font-size="15" text-anchor="middle" fill="#5b21b6">keeps it if it validates</text>
+
+  <line x1="1027" y1="274" x2="1027" y2="348" stroke="#7c3aed" stroke-width="3" marker-end="url(#o4)"/>
+
+  <!-- memory and job-folder outputs -->
+  <rect x="48" y="352" width="400" height="128" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="76" y="386" font-size="18" font-weight="700" fill="#1d4ed8">MEMORY — three lifetimes</text>
+  <text x="76" y="416" font-size="15" fill="#1e3a8a">this step  ·  discarded when it ends</text>
+  <text x="76" y="438" font-size="15" fill="#1e3a8a">this job  ·  TM + glossary, frozen at G1</text>
+  <text x="76" y="460" font-size="15" fill="#1e3a8a">this client  ·  curated, never auto-written</text>
+
+  <rect x="470" y="352" width="400" height="128" rx="14" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+  <text x="498" y="386" font-size="18" font-weight="700" fill="#334155">WRITTEN TO THE JOB FOLDER</text>
+  <text x="498" y="416" font-size="15" fill="#475569">deliverables + PE forms  →  exports/</text>
+  <text x="498" y="438" font-size="15" fill="#475569">stage artifacts, attempt-versioned</text>
+  <text x="498" y="460" font-size="15" fill="#475569">every tool call logged  →  session .jsonl</text>
+
+  <line x1="454" y1="266" x2="454" y2="348" stroke="#475569" stroke-width="3" marker-end="url(#o1)"/>
+  <line x1="746" y1="254" x2="746" y2="348" stroke="#475569" stroke-width="3" marker-end="url(#o1)"/>
+
+  <!-- takeaway -->
+  <text x="48" y="556" font-size="21" font-weight="600" fill="#1f2937">The agent decides what to do next. It never decides what is allowed.</text>
+  <text x="48" y="594" font-size="17" fill="#64748b">Nothing it does is invisible: every step lands in the folder, and every decision lands in the log.</text>
+</svg>

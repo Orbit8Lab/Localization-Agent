@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="w1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="w2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+
+  <text x="60" y="80" font-size="38" font-weight="700" fill="#1f2937">The model improved. The overhead didn't.</text>
+
+  <!-- BEFORE -->
+  <text x="60" y="168" font-size="26" font-weight="700" fill="#64748b">BEFORE</text>
+
+  <g text-anchor="middle">
+    <rect x="230" y="130" width="200" height="80" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="330" y="178" font-size="22" fill="#334155">MT</text>
+
+    <rect x="500" y="130" width="200" height="80" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+    <text x="600" y="178" font-size="22" fill="#b45309">post-edit</text>
+
+    <rect x="770" y="130" width="200" height="80" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="870" y="178" font-size="22" fill="#334155">deliver</text>
+  </g>
+
+  <g stroke="#475569" stroke-width="3">
+    <line x1="430" y1="170" x2="500" y2="170" marker-end="url(#w1)"/>
+    <line x1="700" y1="170" x2="770" y2="170" marker-end="url(#w1)"/>
+  </g>
+
+  <text x="330" y="256" font-size="20" text-anchor="middle" fill="#dc2626">human glue</text>
+  <text x="600" y="256" font-size="20" text-anchor="middle" fill="#dc2626">human glue</text>
+  <text x="870" y="256" font-size="20" text-anchor="middle" fill="#dc2626">human glue</text>
+
+  <text x="60" y="310" font-size="22" fill="#64748b">Editor still reads every line — rate drops only 20–40%.</text>
+
+  <line x1="60" y1="350" x2="1140" y2="350" stroke="#e2e8f0" stroke-width="3"/>
+
+  <!-- AFTER -->
+  <text x="60" y="428" font-size="26" font-weight="700" fill="#1d4ed8">AFTER</text>
+
+  <g text-anchor="middle">
+    <rect x="230" y="390" width="200" height="80" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+    <text x="330" y="438" font-size="22" fill="#1d4ed8">agent</text>
+
+    <rect x="500" y="390" width="200" height="80" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+    <text x="600" y="438" font-size="22" fill="#047857">code gate</text>
+
+    <rect x="770" y="390" width="200" height="80" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+    <text x="870" y="428" font-size="22" fill="#b45309">human</text>
+    <text x="870" y="456" font-size="19" fill="#78350f">decisions only</text>
+  </g>
+
+  <g stroke="#475569" stroke-width="3">
+    <line x1="430" y1="430" x2="500" y2="430" marker-end="url(#w1)"/>
+    <line x1="700" y1="430" x2="770" y2="430" marker-end="url(#w1)"/>
+  </g>
+
+  <path d="M 600 470 C 600 540 330 540 330 470" fill="none" stroke="#dc2626" stroke-width="3" marker-end="url(#w2)"/>
+  <text x="465" y="570" font-size="20" text-anchor="middle" fill="#dc2626">auto-repair</text>
+
+  <text x="60" y="632" font-size="24" font-weight="600" fill="#1f2937">Humans scale with decisions, not with corpus size.</text>
+</svg>

@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="l1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="l2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+
+  <text x="60" y="86" font-size="38" font-weight="700" fill="#1f2937">The whole lifecycle, not one step</text>
+
+  <!-- stage chips -->
+  <g text-anchor="middle">
+    <rect x="60"   y="230" width="122" height="90" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="121" y="270" font-size="21" font-weight="700" fill="#334155">S0</text>
+    <text x="121" y="300" font-size="18" fill="#64748b">intake</text>
+
+    <rect x="204"  y="230" width="122" height="90" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="265" y="270" font-size="21" font-weight="700" fill="#334155">S1</text>
+    <text x="265" y="300" font-size="18" fill="#64748b">ingest</text>
+
+    <rect x="348"  y="230" width="122" height="90" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="409" y="270" font-size="21" font-weight="700" fill="#334155">S2</text>
+    <text x="409" y="300" font-size="18" fill="#64748b">context</text>
+
+    <rect x="492"  y="230" width="122" height="90" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+    <text x="553" y="270" font-size="21" font-weight="700" fill="#b45309">S3</text>
+    <text x="553" y="300" font-size="18" fill="#78350f">glossary</text>
+
+    <rect x="636"  y="230" width="122" height="90" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+    <text x="697" y="270" font-size="21" font-weight="700" fill="#1d4ed8">S4</text>
+    <text x="697" y="300" font-size="18" fill="#1e3a8a">translate</text>
+
+    <rect x="780"  y="230" width="122" height="90" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+    <text x="841" y="270" font-size="21" font-weight="700" fill="#1d4ed8">S5</text>
+    <text x="841" y="300" font-size="18" fill="#1e3a8a">LQA</text>
+
+    <rect x="924"  y="230" width="122" height="90" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="985" y="270" font-size="21" font-weight="700" fill="#334155">S6</text>
+    <text x="985" y="300" font-size="18" fill="#64748b">testing</text>
+
+    <rect x="1068" y="230" width="122" height="90" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="1129" y="270" font-size="21" font-weight="700" fill="#334155">S7</text>
+    <text x="1129" y="300" font-size="18" fill="#64748b">release</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#475569" stroke-width="3">
+    <line x1="182"  y1="275" x2="204"  y2="275" marker-end="url(#l1)"/>
+    <line x1="326"  y1="275" x2="348"  y2="275" marker-end="url(#l1)"/>
+    <line x1="470"  y1="275" x2="492"  y2="275" marker-end="url(#l1)"/>
+    <line x1="614"  y1="275" x2="636"  y2="275" marker-end="url(#l1)"/>
+    <line x1="758"  y1="275" x2="780"  y2="275" marker-end="url(#l1)"/>
+    <line x1="902"  y1="275" x2="924"  y2="275" marker-end="url(#l1)"/>
+    <line x1="1046" y1="275" x2="1068" y2="275" marker-end="url(#l1)"/>
+  </g>
+
+  <!-- gate marks -->
+  <g font-size="18" font-weight="700" fill="#b45309" text-anchor="middle">
+    <text x="481" y="212">G0</text>
+    <text x="625" y="212">G1</text>
+    <text x="769" y="212">G2</text>
+    <text x="913" y="212">G3</text>
+    <text x="1057" y="212">G5</text>
+  </g>
+  <text x="60" y="212" font-size="18" fill="#b45309">▲ human gates</text>
+
+  <!-- defect loop -->
+  <path d="M 841 320 C 841 420 697 420 697 320" fill="none" stroke="#dc2626" stroke-width="3" marker-end="url(#l2)"/>
+  <text x="769" y="452" font-size="21" fill="#dc2626" text-anchor="middle">defect loop</text>
+
+  <text x="60" y="584" font-size="24" font-weight="600" fill="#1f2937">Eight staged contracts. Six human gates.</text>
+  <text x="60" y="620" font-size="24" font-weight="600" fill="#1f2937">Translation is one box.</text>
+</svg>

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <rect width="1200" height="675" fill="#ffffff"/>
+
+  <text x="60" y="86" font-size="38" font-weight="700" fill="#1f2937">More than an AI system</text>
+
+  <!-- three pillars -->
+  <rect x="60" y="160" width="340" height="340" rx="16" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+  <text x="230" y="228" font-size="27" font-weight="700" text-anchor="middle" fill="#b45309">Project</text>
+  <text x="230" y="264" font-size="27" font-weight="700" text-anchor="middle" fill="#b45309">manager</text>
+  <text x="230" y="330" font-size="21" text-anchor="middle" fill="#78350f">workspaces</text>
+  <text x="230" y="372" font-size="21" text-anchor="middle" fill="#78350f">approval ledger</text>
+  <text x="230" y="414" font-size="21" text-anchor="middle" fill="#78350f">deliverable tracking</text>
+  <text x="230" y="456" font-size="21" text-anchor="middle" fill="#78350f">round-trip forms</text>
+
+  <rect x="430" y="160" width="340" height="340" rx="16" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="600" y="228" font-size="27" font-weight="700" text-anchor="middle" fill="#047857">Analysis</text>
+  <text x="600" y="264" font-size="27" font-weight="700" text-anchor="middle" fill="#047857">module</text>
+  <text x="600" y="330" font-size="21" text-anchor="middle" fill="#065f46">drop-over-drop deltas</text>
+  <text x="600" y="372" font-size="21" text-anchor="middle" fill="#065f46">word-count work basis</text>
+  <text x="600" y="414" font-size="21" text-anchor="middle" fill="#065f46">glossary round deltas</text>
+  <text x="600" y="456" font-size="21" text-anchor="middle" fill="#065f46">corpus profiles</text>
+
+  <rect x="800" y="160" width="340" height="340" rx="16" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="970" y="228" font-size="27" font-weight="700" text-anchor="middle" fill="#1d4ed8">Source-side</text>
+  <text x="970" y="264" font-size="27" font-weight="700" text-anchor="middle" fill="#1d4ed8">analytics</text>
+  <text x="970" y="330" font-size="21" text-anchor="middle" fill="#1e40af">inconsistency detection</text>
+  <text x="970" y="372" font-size="21" text-anchor="middle" fill="#1e40af">rename tracking</text>
+  <text x="970" y="414" font-size="21" text-anchor="middle" fill="#1e40af">stale-translation flags</text>
+  <text x="970" y="456" font-size="21" text-anchor="middle" fill="#1e40af">dev-query sheets</text>
+
+  <text x="60" y="576" font-size="24" font-weight="600" fill="#1f2937">Translation quality is table stakes.</text>
+  <text x="60" y="614" font-size="24" font-weight="600" fill="#1f2937">What clients keep is the operating system around it.</text>
+</svg>

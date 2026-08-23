@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="arrL" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrRd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrBl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+  <text x="48" y="56" font-size="30" font-weight="700" fill="#1f2937">Pillar 3 · The full lifecycle, agent-oriented</text>
+  <text x="48" y="86" font-size="17" fill="#6b7280">not a translation tool — the whole localization business as staged contracts, ready for the AI era</text>
+
+  <!-- stage chips row -->
+  <g font-size="15" text-anchor="middle">
+    <rect x="48"  y="150" width="128" height="96" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="112" y="180" font-weight="700" fill="#334155">S0 INTAKE</text>
+    <text x="112" y="204" font-size="12.5" fill="#64748b">market analysis</text>
+    <text x="112" y="222" font-size="12.5" fill="#64748b">SHA-256 log</text>
+
+    <rect x="190" y="150" width="128" height="96" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="254" y="180" font-weight="700" fill="#334155">S1 INGEST</text>
+    <text x="254" y="204" font-size="12.5" fill="#64748b">dedup first</text>
+    <text x="254" y="222" font-size="12.5" fill="#64748b">format capture</text>
+
+    <rect x="332" y="150" width="128" height="96" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="396" y="180" font-weight="700" fill="#334155">S2 CONTEXT</text>
+    <text x="396" y="204" font-size="12.5" fill="#64748b">domains · style</text>
+    <text x="396" y="222" font-size="12.5" fill="#64748b">source analytics</text>
+
+    <rect x="474" y="150" width="128" height="96" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+    <text x="538" y="180" font-weight="700" fill="#b45309">S3 ASSET</text>
+    <text x="538" y="204" font-size="12.5" fill="#78350f">glossary · TM</text>
+    <text x="538" y="222" font-size="12.5" fill="#78350f">frozen at G1</text>
+
+    <rect x="616" y="150" width="128" height="96" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+    <text x="680" y="180" font-weight="700" fill="#1d4ed8">S4 TRANSLATE</text>
+    <text x="680" y="204" font-size="12.5" fill="#1e3a8a">prefill → LLM</text>
+    <text x="680" y="222" font-size="12.5" fill="#1e3a8a">→ gate → repair</text>
+
+    <rect x="758" y="150" width="128" height="96" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+    <text x="822" y="180" font-weight="700" fill="#1d4ed8">S5 LQA</text>
+    <text x="822" y="204" font-size="12.5" fill="#1e3a8a">T1→T2→T3 cascade</text>
+    <text x="822" y="222" font-size="12.5" fill="#1e3a8a">ledger verified</text>
+
+    <rect x="900" y="150" width="128" height="96" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="964" y="180" font-weight="700" fill="#334155">S6 TESTING</text>
+    <text x="964" y="204" font-size="12.5" fill="#64748b">in-game plans</text>
+    <text x="964" y="222" font-size="12.5" fill="#64748b">screenshot QA</text>
+
+    <rect x="1042" y="150" width="110" height="96" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="1097" y="180" font-weight="700" fill="#334155">S7 RELEASE</text>
+    <text x="1097" y="204" font-size="12.5" fill="#64748b">store copy</text>
+    <text x="1097" y="222" font-size="12.5" fill="#64748b">marketing kit</text>
+  </g>
+
+  <!-- connecting arrows + gates -->
+  <g stroke="#475569" stroke-width="2">
+    <line x1="176" y1="198" x2="190" y2="198" marker-end="url(#arrL)"/>
+    <line x1="318" y1="198" x2="332" y2="198" marker-end="url(#arrL)"/>
+    <line x1="460" y1="198" x2="474" y2="198" marker-end="url(#arrL)"/>
+    <line x1="602" y1="198" x2="616" y2="198" marker-end="url(#arrL)"/>
+    <line x1="744" y1="198" x2="758" y2="198" marker-end="url(#arrL)"/>
+    <line x1="886" y1="198" x2="900" y2="198" marker-end="url(#arrL)"/>
+    <line x1="1028" y1="198" x2="1042" y2="198" marker-end="url(#arrL)"/>
+  </g>
+  <g font-size="11.5" fill="#b45309" text-anchor="middle">
+    <text x="467" y="140">G0</text><text x="609" y="140">G1</text>
+    <text x="751" y="140">G2</text><text x="893" y="140">G3–G4</text><text x="1035" y="140">G5</text>
+  </g>
+
+  <!-- loops -->
+  <path d="M 822 246 C 822 300 680 300 680 246" fill="none" stroke="#dc2626" stroke-width="2.5" marker-end="url(#arrRd)"/>
+  <text x="751" y="312" font-size="13.5" fill="#dc2626" text-anchor="middle">defect loop: surgical repair, attempt-versioned</text>
+  <path d="M 254 246 C 254 350 60 330 60 200 C 60 170 48 170 48 190" fill="none" stroke="#2563eb" stroke-width="2.5" marker-end="url(#arrBl)"/>
+  <text x="170" y="350" font-size="13.5" fill="#1d4ed8" text-anchor="middle">incremental drop re-enters S1 with locked assets</text>
+
+  <!-- why agent-oriented -->
+  <rect x="48" y="400" width="540" height="210" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="72" y="436" font-size="18" font-weight="700" fill="#1d4ed8">Agent-oriented = future-proof</text>
+  <text x="72" y="466" font-size="15" fill="#1e3a8a">· Stage contracts are stable; agents behind them are swappable —</text>
+  <text x="86" y="488" font-size="15" fill="#1e3a8a">when a better model ships, we swap the worker, not the factory</text>
+  <text x="72" y="514" font-size="15" fill="#1e3a8a">· Every artifact carries its model fingerprint — quality is</text>
+  <text x="86" y="536" font-size="15" fill="#1e3a8a">attributable months later, per stage, per attempt</text>
+  <text x="72" y="562" font-size="15" fill="#1e3a8a">· The operator talks to an orchestrator that routes plain-language</text>
+  <text x="86" y="584" font-size="15" fill="#1e3a8a">requests to typed tools — new capability = one new tool</text>
+
+  <rect x="612" y="400" width="540" height="210" rx="14" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+  <text x="636" y="436" font-size="18" font-weight="700" fill="#334155">Beyond translation, one system</text>
+  <text x="636" y="466" font-size="15" fill="#475569">· S0 market assessment and S7 store-page copy share the same</text>
+  <text x="650" y="488" font-size="15" fill="#475569">glossary, style brief and audit trail as the game text</text>
+  <text x="636" y="514" font-size="15" fill="#475569">· In-game testing plans sized from S1 word counts + S2 domains</text>
+  <text x="636" y="540" font-size="15" fill="#475569">· One decision ledger feeds translation, QA, testing and marketing —</text>
+  <text x="650" y="562" font-size="15" fill="#475569">terminology cannot fork between deliverables</text>
+</svg>

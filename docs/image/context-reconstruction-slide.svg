@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+
+  <text x="60" y="80" font-size="38" font-weight="700" fill="#1f2937">MT sees a row. A localizer sees the game.</text>
+
+  <!-- input row -->
+  <rect x="60" y="150" width="300" height="130" rx="14" fill="#f8fafc" stroke="#94a3b8" stroke-width="3"/>
+  <text x="210" y="200" font-size="22" font-weight="700" text-anchor="middle" fill="#334155">ONE ROW</text>
+  <text x="210" y="242" font-size="22" text-anchor="middle" fill="#64748b">"打开"</text>
+
+  <line x1="360" y1="215" x2="440" y2="215" stroke="#475569" stroke-width="3" marker-end="url(#c1)"/>
+
+  <!-- signals -->
+  <rect x="440" y="120" width="320" height="190" rx="14" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="600" y="166" font-size="22" font-weight="700" text-anchor="middle" fill="#1d4ed8">SIGNALS</text>
+  <text x="600" y="208" font-size="20" text-anchor="middle" fill="#1e3a8a">engine path</text>
+  <text x="600" y="244" font-size="20" text-anchor="middle" fill="#1e3a8a">key convention</text>
+  <text x="600" y="280" font-size="20" text-anchor="middle" fill="#1e3a8a">neighboring lines</text>
+
+  <line x1="760" y1="215" x2="840" y2="215" stroke="#475569" stroke-width="3" marker-end="url(#c1)"/>
+
+  <!-- output -->
+  <rect x="840" y="150" width="300" height="130" rx="14" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="990" y="200" font-size="22" font-weight="700" text-anchor="middle" fill="#047857">CLASSIFIED</text>
+  <text x="990" y="242" font-size="20" text-anchor="middle" fill="#064e3b">UI · button · 4 chars</text>
+
+  <!-- precedence bar -->
+  <text x="60" y="390" font-size="24" font-weight="600" fill="#1f2937">Decided once, with its evidence recorded:</text>
+
+  <g text-anchor="middle">
+    <rect x="60" y="420" width="200" height="80" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="3"/>
+    <text x="160" y="468" font-size="21" font-weight="700" fill="#b45309">human</text>
+
+    <rect x="290" y="420" width="200" height="80" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="390" y="468" font-size="21" fill="#334155">location</text>
+
+    <rect x="520" y="420" width="200" height="80" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="3"/>
+    <text x="620" y="468" font-size="21" fill="#334155">key rule</text>
+
+    <rect x="750" y="420" width="200" height="80" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+    <text x="850" y="468" font-size="21" fill="#1d4ed8">LLM</text>
+
+    <rect x="980" y="420" width="160" height="80" rx="12" fill="#fef2f2" stroke="#dc2626" stroke-width="3"/>
+    <text x="1060" y="460" font-size="21" fill="#b91c1c">fallback</text>
+    <text x="1060" y="486" font-size="17" fill="#7f1d1d">→ human</text>
+  </g>
+
+  <text x="60" y="546" font-size="20" fill="#64748b">highest authority wins</text>
+  <line x1="270" y1="540" x2="1130" y2="540" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#c1)"/>
+
+  <text x="60" y="616" font-size="24" font-weight="600" fill="#1f2937">Low confidence routes toward review, never away from it.</text>
+</svg>

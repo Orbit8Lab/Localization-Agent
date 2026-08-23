@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" font-family="ui-sans-serif,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <marker id="arrS" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d97706"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="675" fill="#ffffff"/>
+  <text x="48" y="56" font-size="30" font-weight="700" fill="#1f2937">Pillar 2 · The glossary + PE flywheel</text>
+  <text x="48" y="86" font-size="17" fill="#6b7280">every human decision becomes a machine-enforced rule — AI bugs are collected, field-specific mistakes stop recurring</text>
+
+  <!-- loop nodes (clockwise) -->
+  <g>
+    <rect x="80" y="140" width="220" height="84" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="190" y="174" font-size="17" font-weight="700" text-anchor="middle" fill="#334155">GAME CORPUS</text>
+    <text x="190" y="198" font-size="14" text-anchor="middle" fill="#64748b">every drop, full text —</text>
+    <text x="190" y="216" font-size="14" text-anchor="middle" fill="#64748b">sentence interiors included</text>
+
+    <rect x="400" y="140" width="220" height="84" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+    <text x="510" y="168" font-size="17" font-weight="700" text-anchor="middle" fill="#047857">EXTRACT (S0–S3)</text>
+    <text x="510" y="192" font-size="14" text-anchor="middle" fill="#064e3b">dedup → mine 1,046 candidates</text>
+    <text x="510" y="210" font-size="14" text-anchor="middle" fill="#064e3b">→ LLM filter → assemble</text>
+
+    <rect x="720" y="140" width="220" height="84" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+    <text x="830" y="168" font-size="17" font-weight="700" text-anchor="middle" fill="#b45309">HUMAN REVIEW</text>
+    <text x="830" y="192" font-size="14" text-anchor="middle" fill="#78350f">term-level PE form — 28 rows,</text>
+    <text x="830" y="210" font-size="14" text-anchor="middle" fill="#78350f">not 319; fixed decision vocab</text>
+
+    <rect x="880" y="300" width="240" height="110" rx="12" fill="#f8fafc" stroke="#475569" stroke-width="2"/>
+    <text x="1000" y="330" font-size="17" font-weight="700" text-anchor="middle" fill="#334155">DECISION LEDGER</text>
+    <text x="1000" y="354" font-size="14" text-anchor="middle" fill="#64748b">locked terms · family rules (族)</text>
+    <text x="1000" y="372" font-size="14" text-anchor="middle" fill="#64748b">rename chains · rejections</text>
+    <text x="1000" y="390" font-size="14" text-anchor="middle" fill="#64748b">round provenance — a ledger, not a list</text>
+
+    <rect x="560" y="470" width="250" height="94" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+    <text x="685" y="500" font-size="17" font-weight="700" text-anchor="middle" fill="#1d4ed8">TRANSLATION</text>
+    <text x="685" y="524" font-size="14" text-anchor="middle" fill="#1e3a8a">glossary slice in every prompt;</text>
+    <text x="685" y="542" font-size="14" text-anchor="middle" fill="#1e3a8a">exact hits prefill at zero cost</text>
+
+    <rect x="200" y="470" width="250" height="94" rx="12" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+    <text x="325" y="500" font-size="17" font-weight="700" text-anchor="middle" fill="#047857">DETERMINISTIC GATE</text>
+    <text x="325" y="524" font-size="14" text-anchor="middle" fill="#064e3b">locked term missing? one repair</text>
+    <text x="325" y="542" font-size="14" text-anchor="middle" fill="#064e3b">retry, then flag — never silent</text>
+  </g>
+
+  <!-- loop arrows -->
+  <line x1="300" y1="182" x2="400" y2="182" stroke="#475569" stroke-width="2.5" marker-end="url(#arrS)"/>
+  <line x1="620" y1="182" x2="720" y2="182" stroke="#475569" stroke-width="2.5" marker-end="url(#arrS)"/>
+  <path d="M 900 224 C 970 240 990 260 1000 300" fill="none" stroke="#d97706" stroke-width="2.5" marker-end="url(#arrA)"/>
+  <path d="M 940 410 C 890 450 850 470 812 490" fill="none" stroke="#475569" stroke-width="2.5" marker-end="url(#arrS)"/>
+  <line x1="560" y1="517" x2="450" y2="517" stroke="#475569" stroke-width="2.5" marker-end="url(#arrS)"/>
+  <path d="M 200 500 C 120 460 100 320 120 224" fill="none" stroke="#475569" stroke-width="2.5" marker-end="url(#arrS)"/>
+  <text x="118" y="380" font-size="13.5" fill="#64748b" transform="rotate(-78 118 380)">next drop: only the delta asks questions</text>
+
+  <!-- violations to PE -->
+  <path d="M 325 470 C 340 380 560 330 880 350" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="540" y="366" font-size="13.5" fill="#dc2626">surviving violations → PE form → new ruling or challenge</text>
+
+  <!-- side box: AI bug collection -->
+  <rect x="80" y="252" width="300" height="150" rx="12" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+  <text x="104" y="284" font-size="16.5" font-weight="700" fill="#b91c1c">AI-bug collection, built in</text>
+  <text x="104" y="312" font-size="14" fill="#7f1d1d">Every PE rejection carries category ×</text>
+  <text x="104" y="332" font-size="14" fill="#7f1d1d">severity (Accuracy/Terminology/Tone/</text>
+  <text x="104" y="352" font-size="14" fill="#7f1d1d">Fluency/Technical) — a labeled error</text>
+  <text x="104" y="372" font-size="14" fill="#7f1d1d">corpus that tunes prompts, gates and</text>
+  <text x="104" y="392" font-size="14" fill="#7f1d1d">the error taxonomy every round.</text>
+
+  <text x="48" y="622" font-size="16.5" font-weight="600" fill="#1f2937">The loop converges: rejections are remembered, decisions compound, and the same terminology</text>
+  <text x="48" y="646" font-size="16.5" font-weight="600" fill="#1f2937">question is never asked twice — 瘟疫点 is "Plague Node" forever, in every string, checked by code.</text>
+</svg>
