@@ -34,6 +34,8 @@ from .gate_checks import GateConfig
 from .ingest import run_ingest
 from .llm import EchoProvider, Provider
 from .memory import RunDB, TenantMemory, TranslationMemory
+from .observation import (ACCEPTED, FIRST, G3_ACCEPTED, G3_EDITED,
+                          ObservationLog)
 from .schemas import (DomainLabels, GlossaryDelta, HealthReport, IngestReport,
                       IntakeBrief, LQAReport, MarketReport, MTPEQueue,
                       SourceBatch, StyleBrief, TestPlan, TranslateRunSummary,
@@ -233,6 +235,11 @@ class Job:
     def _tenant(self) -> TenantMemory:
         return TenantMemory(self.store.root, self.control["tenant_id"])
 
+    def _observations(self) -> ObservationLog:
+        """PLAN §3. Write-only: nothing in the pipeline reads this to make a
+        decision, which is what makes Phase 1 unable to regress anything."""
+        return ObservationLog(self.store.observations_path())
+
     def _style(self) -> StyleBrief:
         return self.store.read(2, "style_brief", StyleBrief)
 
@@ -396,10 +403,12 @@ class Job:
             critic_mode="off" if dry_run else ("all" if kind == "pilot"
                                                else "flagged"),
             samples=2 if (kind == "pilot" and not dry_run) else 1)
+        attempt = self.store.latest_attempt(4) or self.store.new_attempt(4)
         ctx = StageContext(provider=provider, cfg=cfg, run_db=run_db,
                            tm=TranslationMemory(self.store.tm_path()),
-                           glossary=glossary, style_brief=self._style())
-        attempt = self.store.latest_attempt(4) or self.store.new_attempt(4)
+                           glossary=glossary, style_brief=self._style(),
+                           observations=self._observations(),
+                           attempt=attempt)
         limit = self.control["pilot_size"] if kind == "pilot" else None
         summary = run_translate_stage(ctx, self.job_id, limit=limit)
         self.store.write(4, f"run_summary.{kind}.{locale}", summary,
@@ -440,17 +449,57 @@ class Job:
         """G3 side effect (v0 simplification): approving G3 asserts the
         human worked the queue — post-edited targets should be imported
         before approval. Remaining flagged/mtpe rows are accepted as-is,
-        and human-confirmed pairs write back to the TM."""
+        and human-confirmed pairs write back to the TM.
+
+        This also records the per-string G3 verdict into the observation log
+        (PLAN §3, §5.6). The verdict is DERIVED, not asked for: if the
+        target at approval time differs from what S4 produced, a human
+        changed it, and that is an overturn of our own gate's judgment. The
+        derivation is deliberately conservative — see `_g3_verdict`.
+        """
         intake = self._intake()
         tm = TranslationMemory(self.store.tm_path())
+        observations = self._observations()
         for locale in intake.target_locales:
             run_db = self._run_db(locale)
             for row in run_db.by_status("flagged", "mtpe"):
                 if row["target"]:
                     tm.store(row["text"], row["target"], locale,
                              origin="human")
+                verdict, text = self._g3_verdict(observations, row)
+                if verdict is not None:
+                    observations.record_g3(row["uid"], verdict, text)
                 run_db.record(row["uid"], status="accepted",
                               resolution=row["resolution"] or "post-edited")
+
+    @staticmethod
+    def _g3_verdict(observations: ObservationLog,
+                    row: dict) -> tuple[Optional[str], Optional[str]]:
+        """What the human decided about one string, or (None, None) when the
+        log cannot honestly tell.
+
+        A row is `edited` when the approved target differs from the best
+        candidate S4 recorded, `accepted` when it is unchanged. Silence is
+        the third outcome and it is important: this v0 gate approves in
+        bulk, so "the operator did not touch this string" is NOT evidence
+        of agreement when there is no observation to compare against. A
+        fabricated `accepted` would be worse than no data — it would look
+        like human endorsement to every later utility estimate (PLAN §5.6).
+        """
+        prior = observations.for_uid(row["uid"])
+        if not prior:
+            return None, None
+        # The last candidate the RATCHET kept is what S4 handed to the
+        # reviewer. Note these are ratchet verdicts (ACCEPTED/FIRST), not
+        # G3 verdicts — the two vocabularies share the string "accepted"
+        # and must not be confused: one is our gate's opinion, the other
+        # is the human's, and telling them apart is the entire point.
+        final = next((o for o in reversed(prior)
+                      if o["verdict"] in (ACCEPTED, FIRST)), None)
+        if final is None or not row["target"]:
+            return None, None
+        return ((G3_ACCEPTED, None) if row["target"] == final["target"]
+                else (G3_EDITED, row["target"]))
 
     def _do_testing(self, stage: Stage, provider: Provider,
                     dry_run: bool) -> None:

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass, field
-from typing import Annotated, Dict, List, Optional, TypedDict
+from typing import Annotated, Dict, List, Optional, Tuple, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -39,6 +39,8 @@ from ..gate_checks import GateConfig, run_gate
 from ..glossary import Glossary
 from ..llm import Provider
 from ..memory import RunDB, TranslationMemory
+from ..observation import (ACCEPTED, FIRST, REJECTED, Observation,
+                           ObservationLog, signatures)
 from ..schemas import (Domain, Finding, MTPE_DOMAINS, MTPEItem, MTPEReason,
                        Severity, StyleBrief, TranslateRunSummary)
 
@@ -104,6 +106,12 @@ class StageContext:
     tm: Optional[TranslationMemory] = None
     glossary: Optional[Glossary] = None
     style_brief: Optional[StyleBrief] = None
+    # PLAN §3: write-only observation of the ratchet. Optional so every
+    # existing caller keeps working and a run without it behaves
+    # identically — this layer must be impossible to depend on.
+    observations: Optional[ObservationLog] = None
+    attempt: int = 1                   # the s4 attempt these rows belong to
+    store_revision: int = 0
 
 
 def build_translate_graph(ctx: StageContext):
@@ -172,7 +180,14 @@ def build_translate_graph(ctx: StageContext):
                 candidate: Candidate = {"target": item.target_text,
                                         "findings": [],
                                         "term_decisions": item.term_decisions}
-                best.setdefault(item.key, candidate)
+                if item.key not in best:
+                    # First sample becomes the incumbent directly. Writing it
+                    # under a staging key TOO would make the gate score one
+                    # model call twice and log the second copy as a rejection
+                    # of the first, understating the accept rate on first
+                    # translations (PLAN §3 — the log's whole purpose).
+                    best[item.key] = candidate
+                    continue
                 # later samples land via the gate ratchet below; store the
                 # raw alternative under a staging key
                 best[f"__sample__{sample}__{item.key}"] = candidate
@@ -185,14 +200,39 @@ def build_translate_graph(ctx: StageContext):
         incumbent only when STRICTLY better — a repair that fixed one thing
         and broke another is rolled back, keeping quality monotonic."""
         best: Dict[str, Candidate] = {}
-        staged: Dict[str, List[Candidate]] = {}
+        # (candidate, strategy) pairs kept together: the staging key carries
+        # provenance — repair candidates are written as
+        # __sample__r{iteration}__{uid} (see repair()), extra samples as
+        # __sample__{n}__{uid}, and the incumbent under the bare uid. A
+        # log that cannot tell a repair's outcome from a first
+        # translation's cannot measure whether repair works at all.
+        staged: Dict[str, List[Tuple[Candidate, str]]] = {}
         for key, cand in state.get("best", {}).items():
-            uid = key.split("__")[-1] if key.startswith("__sample__") else key
-            staged.setdefault(uid, []).append(cand)
+            if key.startswith("__sample__r"):
+                uid, strategy = key.split("__")[-1], "repair"
+            elif key.startswith("__sample__"):
+                uid, strategy = key.split("__")[-1], "translate"
+            else:
+                # The bare-uid incumbent, re-scored on every pass. It is
+                # not a new attempt at anything, so it is not observed.
+                uid, strategy = key, "incumbent"
+            staged.setdefault(uid, []).append((cand, strategy))
+        # An incumbent already scored on a previous pass is not a new
+        # attempt; one appearing on the FIRST pass is the opening
+        # translation and must be counted. `seen` (populated by route) is
+        # empty until the first repair, which distinguishes the two without
+        # threading extra state through the graph.
+        first_pass = state.get("iteration", 0) == 0
         new_findings: List[Finding] = []
         for uid, candidates in staged.items():
             seg = ctx.run_db.get(uid)
-            for cand in candidates:
+            # Score the incumbent FIRST so a repair candidate is always
+            # ratcheted against a real incumbent. Relying on dict order
+            # here would work today and break silently the moment a node
+            # writes its keys differently — and it would corrupt the
+            # ratchet itself, not just the log.
+            candidates.sort(key=lambda pair: pair[1] != "incumbent")
+            for cand, strategy in candidates:
                 findings = [] if cfg.dry_run else run_gate(
                     uid, seg["text"], cand["target"], cfg.gate,
                     term_decisions=cand["term_decisions"])
@@ -200,11 +240,60 @@ def build_translate_graph(ctx: StageContext):
                                      "findings": findings,
                                      "term_decisions": cand["term_decisions"]}
                 incumbent = best.get(uid)
-                if (incumbent is None
-                        or _badness(findings) < _badness(incumbent["findings"])):
+                accepted = (incumbent is None
+                            or _badness(findings)
+                            < _badness(incumbent["findings"]))
+                if strategy != "incumbent" or first_pass:
+                    _observe(state, uid, scored, incumbent,
+                             "translate" if strategy == "incumbent"
+                             else strategy, accepted)
+                if accepted:
                     best[uid] = scored
             new_findings.extend(best[uid]["findings"])
         return {"best": best, "findings": new_findings}
+
+    # -------------------------------------------------------- observation
+
+    def _observe(state: TranslateState, uid: str, scored: Candidate,
+                 incumbent: Optional[Candidate], strategy: str,
+                 accepted: bool) -> None:
+        """Write one ratchet observation (PLAN §3). Write-only.
+
+        Records REJECTIONS as well as accepts, deliberately: a rolled-back
+        repair is the negative example that will later bound a skill's
+        applicability (PLAN §4.3, §6.3). Logging only the winners is how a
+        skill silently generalizes past where it works.
+
+        Never raises. This is a logging concern hanging off the pipeline's
+        single most important decision, and no observation is worth
+        failing a translate batch for.
+        """
+        if ctx.observations is None:
+            return
+        try:
+            ctx.observations.record(Observation(
+                job_id=state.get("job_id", ""),
+                locale=cfg.locale,
+                attempt=ctx.attempt,
+                revision=ctx.store_revision,
+                batch_id=state.get("batch_id"),
+                uid=uid,
+                # Signatures of what is STILL WRONG with this candidate —
+                # the defect classes the next repair would target.
+                signatures=signatures(scored["findings"]),
+                strategy=strategy,
+                target=scored["target"],
+                iteration=state.get("iteration", 0),
+                badness_before=(None if incumbent is None
+                                else _badness(incumbent["findings"])),
+                badness_after=_badness(scored["findings"]),
+                verdict=(FIRST if incumbent is None
+                         else ACCEPTED if accepted else REJECTED),
+                tokens=(ctx.provider.tokens_spent
+                        - state.get("tokens_start", 0.0)),
+            ))
+        except Exception:                      # pragma: no cover - guard
+            pass
 
     # ------------------------------------------------------------- critic
 
