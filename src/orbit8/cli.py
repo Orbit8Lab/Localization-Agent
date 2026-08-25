@@ -1013,11 +1013,23 @@ def _cmd_chat(args) -> int:
     def on_action(tool: str, result: str) -> None:
         live.stop(f"  ⚙ {tool}" if not verbose["on"] else "")
 
+    # PLAN §8: stage playbooks. Loaded non-strictly here — a malformed doc
+    # must not stop an operator from working, though the test suite loads
+    # strictly so the malformed doc still gets caught in CI.
+    from .skill_docs import SkillLibrary, default_skills_dir
+    skills = SkillLibrary.load(
+        default_skills_dir(),
+        known_tools=set(ChatOrchestrator.tool_names()), strict=False)
     chat = ChatOrchestrator(
         job, provider, operator=args.by, provider_factory=factory,
         dry_run=args.dry_run, on_action=on_action, on_start=on_start,
-        trace_path=trace_path)
+        trace_path=trace_path, skills=skills)
     print(f"orbit8 chat — job {args.job_id}, operator {args.by}")
+    stage = job.derive()
+    active = skills.for_stage(stage.phase, stage.gate)
+    if active:
+        print(f"playbook: {active.name} ({stage.phase}"
+              + (f"/{stage.gate}" if stage.gate else "") + ")")
     print(f"trace: {trace_path}   (/help for debug commands)")
     seen = 0
     while True:
@@ -1210,6 +1222,88 @@ def _cmd_observations(args) -> int:
             print(f"  {row['signature']}  "
                   f"upheld {row['g3_accepted'] or 0} / "
                   f"overturned {row['g3_overturned'] or 0}")
+    return 0
+
+
+def _cmd_calibrate(args) -> int:
+    """Sweep promotion thresholds over an EXISTING observation log.
+
+    The point of this command is that it costs nothing: the observations
+    are fixed input, the policy is the variable, so exploring the
+    threshold space is milliseconds of replay rather than repeated Stage 4
+    runs. PLAN leaves every one of these constants deliberately unset —
+    this is how they stop being guesses.
+
+    The useful output is not the promote count but the BLOCKER histogram:
+    a signature blocked only by `min_g3_reviewed` is waiting on reviewers,
+    while one blocked by `min_g3_agreement` is telling you the fix is
+    wrong. Those two need opposite responses.
+    """
+    from .observation import ObservationLog
+    from .skills import PromotionPolicy, group_by_signature, replay
+
+    job = Job(Path(args.root), args.job_id)
+    rows = ObservationLog(job.store.observations_path()).all_rows()
+    if not rows:
+        print("no observations to calibrate against — run Stage 4 first")
+        return 0
+    grouped = group_by_signature(rows)
+    if not grouped:
+        print(f"{len(rows)} observations, but none carry a defect signature.")
+        print("Nothing to calibrate: no candidate ever had a finding to fix.")
+        return 0
+
+    policy = PromotionPolicy(
+        min_samples=args.min_samples,
+        min_g3_reviewed=args.min_g3_reviewed,
+        min_g3_agreement=args.min_g3_agreement,
+        min_utility=args.min_utility)
+    results = replay(grouped, policy)
+    promoted = [r for r in results if r["would_promote"]]
+
+    print(f"observations {len(rows)}   signatures {len(results)}")
+    print(f"policy: min_samples={policy.min_samples} "
+          f"min_g3_reviewed={policy.min_g3_reviewed} "
+          f"min_g3_agreement={policy.min_g3_agreement} "
+          f"min_utility={policy.min_utility}")
+    print(f"would promote: {len(promoted)}/{len(results)}\n")
+
+    print(f"{'signature':<38}{'strings':>8}{'util':>7}{'acc':>6}"
+          f"{'G3n':>5}{'G3ok':>6}{'Δbad':>7}{'ctr':>5}  blockers")
+    print("-" * 96)
+    for row in results[:args.limit]:
+        mark = "✓" if row["would_promote"] else " "
+        print(f"{mark}{row['signature'][:37]:<37}"
+              f"{row['distinct_strings']:>8}{row['utility']:>7.3f}"
+              f"{row['accept_rate']:>6.2f}{row['g3_reviewed']:>5}"
+              f"{row['g3_agreement']:>6.2f}"
+              f"{row['mean_badness_delta']:>7.1f}"
+              f"{row['counter_examples']:>5}  "
+              f"{','.join(row['blockers'])}")
+    if len(results) > args.limit:
+        print(f"... {len(results) - args.limit} more (--limit to widen)")
+
+    counts: dict = {}
+    for row in results:
+        for blocker in row["blockers"]:
+            counts[blocker] = counts.get(blocker, 0) + 1
+    if counts:
+        print("\nbinding blockers (what to change, and what it means):")
+        for name, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {name:<20}{n:>5}")
+        dominant = max(counts, key=lambda k: counts[k])
+        if dominant == "min_g3_reviewed":
+            print("\n  min_g3_reviewed dominates: the log is waiting on "
+                  "HUMAN review, not on a\n  threshold. Lowering it would "
+                  "promote on unreviewed data (PLAN §5.6).")
+        elif dominant == "min_g3_agreement":
+            print("\n  min_g3_agreement dominates: reviewers are OVERRULING "
+                  "these fixes. That is\n  a miscalibrated gate check, not "
+                  "a threshold to lower (PLAN §5.6).")
+        elif dominant == "min_samples":
+            print("\n  min_samples dominates: not enough distinct strings "
+                  "yet. More data, not\n  a lower floor — unless recurrence "
+                  "never arrives, which is PLAN §6.1's\n  stop condition.")
     return 0
 
 
@@ -1697,6 +1791,28 @@ def main(argv=None) -> int:
     obs.add_argument("--limit", type=int, default=25,
                      help="signature rows to print (default 25)")
     obs.set_defaults(func=_cmd_observations)
+
+    cal = sub.add_parser(
+        "calibrate",
+        help="sweep promotion thresholds over an existing observation log "
+             "— no API spend (PLAN §6.2)")
+    cal.add_argument("root")
+    cal.add_argument("job_id")
+    cal.add_argument("--min-samples", type=int, default=20,
+                     dest="min_samples",
+                     help="distinct strings before a signature is a "
+                          "candidate (default 20, uncalibrated)")
+    cal.add_argument("--min-g3-reviewed", type=int, default=10,
+                     dest="min_g3_reviewed",
+                     help="human-reviewed cases required (default 10)")
+    cal.add_argument("--min-g3-agreement", type=float, default=0.9,
+                     dest="min_g3_agreement",
+                     help="fraction upheld at G3 (default 0.9)")
+    cal.add_argument("--min-utility", type=float, default=0.5,
+                     dest="min_utility",
+                     help="utility floor for retrieval (default 0.5)")
+    cal.add_argument("--limit", type=int, default=25)
+    cal.set_defaults(func=_cmd_calibrate)
 
     args = parser.parse_args(argv)
     return args.func(args)

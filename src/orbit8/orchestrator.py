@@ -31,6 +31,7 @@ from .controller import GATE_NAMES, Job
 from .llm import Provider, complete_json
 from .memory import RunDB
 from .schemas import IntakeBrief, Strict
+from .skill_docs import SkillLibrary
 
 MAX_STEPS_PER_TURN = 14
 OBSERVATION_LIMIT = 12000         # chars of tool output fed back to the model
@@ -209,10 +210,15 @@ class ChatOrchestrator:
                  provider_factory=None, dry_run: bool = False,
                  on_action: Optional[Callable[[str, str], None]] = None,
                  on_start: Optional[Callable[[str, dict], None]] = None,
-                 trace_path: Optional[Path] = None):
+                 trace_path: Optional[Path] = None,
+                 skills: Optional["SkillLibrary"] = None):
         self.job = job
         self.provider = provider
         self.operator = operator
+        # PLAN §8: stage playbooks, selected by what the Controller derives
+        # rather than by the operator's phrasing. Optional — a session with
+        # no library behaves exactly as before.
+        self.skills = skills
         self.provider_factory = provider_factory
         self.dry_run = dry_run
         self.on_action = on_action or (lambda tool, result: None)
@@ -624,8 +630,65 @@ class ChatOrchestrator:
 
     # -------------------------------------------------------------- loop
 
+    def _tools(self) -> Dict[str, Callable[[dict], str]]:
+        """The tool registry — THE list of things this agent can do.
+
+        Hoisted out of `turn()` so it is a single source of truth: the
+        skill-doc loader validates every `tools:` entry against this map
+        (PLAN §8), and a doc naming a capability that does not exist fails
+        at load instead of sending the agent hunting for it. A second copy
+        of this list would let the two drift apart silently, which is the
+        exact failure mode skill docs are supposed to stop having.
+        """
+        return {"status": self._t_status, "next_step": self._t_next_step,
+                "approve": self._t_approve,
+                "read_artifact": self._t_read_artifact,
+                "list_artifacts": self._t_list_artifacts,
+                "flagged": self._t_flagged,
+                "list_files": self._t_list_files,
+                "inspect_file": self._t_inspect_file,
+                "standardize": self._t_standardize,
+                "analyze": self._t_analyze,
+                "compare_po": self._t_compare_po,
+                "deliver_po": self._t_deliver_po,
+                "update_glossary": self._t_update_glossary,
+                "extract_glossary": self._t_extract_glossary,
+                "add_glossary_terms": self._t_add_glossary_terms,
+                "translate_po": self._t_translate_po,
+                "scan_po": self._t_scan_po}
+
+    @classmethod
+    def tool_names(cls) -> frozenset:
+        """Tool names without needing a live session (for the loader and
+        its tests). Derived from the same method the agent uses, via a
+        throwaway instance-free introspection of the handler prefix."""
+        return frozenset(
+            name[3:] for name in dir(cls) if name.startswith("_t_"))
+
+    def _playbook(self) -> Optional[str]:
+        """The stage playbook for the CURRENT derived stage (PLAN §8).
+
+        Keyed on `job.derive()`, so the agent gets the playbook for the
+        stage the artifact tree says it is in — it cannot request another
+        stage's guidance by rephrasing. Failures are swallowed: a playbook
+        is guidance layered over a working system, and a missing or broken
+        doc must never take a session down.
+        """
+        if self.skills is None:
+            return None
+        try:
+            stage = self.job.derive()
+            skill = self.skills.for_stage(stage.phase, stage.gate)
+            return skill.prompt_section() if skill else None
+        except Exception:                      # pragma: no cover - guard
+            return None
+
     def _transcript(self, user_msg: str) -> str:
         lines = []
+        playbook = self._playbook()
+        if playbook:
+            lines.append(playbook)
+            lines.append("")
         for role, text in self.history[-30:]:
             lines.append(f"[{role}] {text}")
         lines.append(f"[operator] {user_msg}")
@@ -655,22 +718,7 @@ class ChatOrchestrator:
         """One operator message → tool calls → one reply."""
         self.turn_no += 1
         self._trace("operator", message=user_msg)
-        tools = {"status": self._t_status, "next_step": self._t_next_step,
-                 "approve": self._t_approve,
-                 "read_artifact": self._t_read_artifact,
-                 "list_artifacts": self._t_list_artifacts,
-                 "flagged": self._t_flagged,
-                 "list_files": self._t_list_files,
-                 "inspect_file": self._t_inspect_file,
-                 "standardize": self._t_standardize,
-                 "analyze": self._t_analyze,
-                 "compare_po": self._t_compare_po,
-                 "deliver_po": self._t_deliver_po,
-                 "update_glossary": self._t_update_glossary,
-                 "extract_glossary": self._t_extract_glossary,
-                 "add_glossary_terms": self._t_add_glossary_terms,
-                 "translate_po": self._t_translate_po,
-                 "scan_po": self._t_scan_po}
+        tools = self._tools()
         pending_user = user_msg
         for _ in range(MAX_STEPS_PER_TURN):
             self.on_start("(thinking)", {})
