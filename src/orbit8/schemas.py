@@ -239,6 +239,52 @@ class AuditedFixRequest(Strict):
     requested_by: str
 
 
+class SkillCounterExample(Strict):
+    """One case where a fix matching this signature did NOT work — the
+    negative track (PLAN §6.3). `g3_overturned` cases are the strongest:
+    our gate accepted the candidate and a human overruled it."""
+    uid: str
+    locale: str
+    reason: str                    # ratchet_rejected | g3_overturned
+    attempt: int = 1
+    badness_before: Optional[int] = None
+    badness_after: Optional[int] = None
+    human_text: Optional[str] = None
+
+
+class SkillPromotionRequest(Strict):
+    """A learned repair skill proposed for activation (PLAN §5.8).
+
+    Filing this does NOT activate anything. A promoted skill is new latent
+    capability that would make silent decisions on every future job, and
+    that is the class of change this architecture routes through a human —
+    the same way a locked glossary only changes via `AuditedFixRequest`.
+
+    It carries both tracks on purpose. A reviewer shown only `accepted`
+    and an agreement rate has nothing to judge but a win count, which
+    invites a rubber-stamp; shown `counter_examples`, they can see the
+    skill's proposed BOUNDARY and ask whether it is drawn in the right
+    place — which is the one question a human answers better than the log.
+    """
+    signature: str
+    tenant_id: str
+    fix_ref: str
+    # positive track
+    accepted: int
+    distinct_strings: int
+    mean_badness_delta: float
+    g3_reviewed: int
+    g3_agreement: float
+    utility_score: float
+    # negative track — the applicability boundary (PLAN §6.3)
+    rejected: int = 0
+    counter_examples: List[SkillCounterExample] = Field(default_factory=list)
+    # provenance: which attempts of which jobs voted for this
+    observed_at: List[Dict[str, object]] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    requested_by: str = "code:skill-registry@1"
+
+
 # ------------------------------------------------------------- translation
 
 class TranslationItem(Strict):

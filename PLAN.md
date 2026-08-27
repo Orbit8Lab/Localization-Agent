@@ -189,6 +189,13 @@ prompts (§5.3). A test pins the absence so it returns on purpose.
 
 ## 4. PHASE 2 — known bugs in the current sketch
 
+> **STATUS: FIXED BY CONSTRUCTION.** These were bugs in a *sketch* — no
+> `SkillRegistry` existed in the codebase. Rather than "fixing" nothing,
+> the registry was built in `src/orbit8/skills.py` with each bug
+> structurally impossible, and each one pinned by a test that fails if the
+> fix is undone (9 tests fail when the §4.1 deadlock is reintroduced).
+> The constants remain **uncalibrated on purpose** — see §4.4.
+
 Fix these before anything is built on the registry. None has a caller
 yet, so all three are free to fix now and expensive to fix later.
 
@@ -261,6 +268,34 @@ Keeping them is the schema half. §6.3 is the design half: rejections are
 the **negative track** that defines where a skill stops applying, so they
 are not exhaust to be retained for debugging — they are half of what a
 skill is.
+
+### 4.4 Every threshold is a parameter, not a decision
+
+`PromotionPolicy` holds all of them in one injectable dataclass:
+`min_samples`, `min_g3_reviewed`, `min_g3_agreement`, `min_utility`,
+`decay_window`, `decay_floor`, `staleness_limit`.
+
+The shipped values are **placeholders chosen to fail closed**, not
+calibrated numbers: they sit high enough that an uncalibrated system
+promotes nothing rather than promoting on guesswork, and a calibration run
+is expected to *lower* them. A test asserts that the defaults promote
+nothing on a small sample, so the failure mode is silence rather than a
+confident wrong answer.
+
+`skills.replay()` plus `orbit8 calibrate` sweep the space over an
+**existing** observation log — the log is fixed input, the policy is the
+variable, so exploring thresholds costs milliseconds instead of repeated
+Stage 4 runs and API spend.
+
+The output that matters is not the promote count but the **binding
+blocker**, because the responses are opposite:
+
+| Dominant blocker | What it means | What to do |
+|---|---|---|
+| `min_g3_reviewed` | waiting on human review | collect verdicts; do NOT lower |
+| `min_g3_agreement` | reviewers overrule the fix | fix the gate check (§5.6) |
+| `min_samples` | not enough distinct strings | more data — or §6.1's stop condition |
+| `no_badness_gain` | the fix does not work | discard the signature |
 
 ---
 
@@ -603,6 +638,11 @@ into artifacts rather than regenerating.
 
 ## 8. PHASE 6 — SKILL.md at runtime (capability 2)
 
+> **STATUS: BUILT.** `src/orbit8/skill_docs.py` loads and validates
+> `docs/skills/**.md`; `orbit8 chat` injects the playbook for the stage
+> `job.derive()` reports. 13 docs, full lifecycle coverage, 419 tests pass.
+> The drift test found a real disagreement on its first run — see §8.1.
+
 Today `docs/skills/*.md` are **specifications a human implemented**, not
 files the code loads. Every "skill" match in `src/orbit8/` is a comment
 citing provenance; nothing parses them. E.g. the batch policy in
@@ -622,6 +662,41 @@ doc may select and sequence **existing** tools; it must not be able to
 invent capability. That is also why this phase follows Phase 5 — a loader is
 far more useful once the tool set it sequences can grow, and far more
 dangerous if it can grow it itself. The tool set stays the guarantee.
+
+### 8.1 What building it settled
+
+**The drift was real, and worse than "a doc nobody reads."**
+`lqa-batch-split.md` specifies Tier-3 string batches at **n=20**.
+`LQAConfig.batch_size` defaulted to **10**, and because `controller.py`
+constructs `LQAConfig` without overriding it, the **main pipeline ran
+Tier-3 at 10** while `external_lqa.py` — which passes 20 explicitly —
+followed the spec. Two entry points, two behaviors, one governing document,
+no test. Fixed to 20; pinned by two tests, one comparing the doc's table to
+the defaults and one asserting both entry points agree.
+
+**Routing keys on `(phase, gate)`, never on operator phrasing.**
+`job.derive()` already returns the authoritative stage, so selecting a
+playbook is a lookup. A task-keyed router (the natural shape, and the one
+`~/.claude/skills/localization/` uses) would have required the agent to
+infer something the artifact tree already states — reintroducing exactly
+the interpretive latitude §7 removes.
+
+**A doc naming a nonexistent tool must fail loudly, not degrade.** The
+loader validates every `tools:` entry against the live registry and raises.
+A doc referencing a capability that does not exist is worse than no doc: it
+teaches the agent to attempt the impossible and then improvise. Loading is
+strict in CI; the CLI loads non-strictly so one malformed doc cannot stop an
+operator from working.
+
+**The tool registry had to become a single source of truth.** It was built
+inline inside `turn()`, so validating against it meant either importing a
+copy or duplicating the list — the same drift, one level up. Hoisted to
+`_tools()`, with a test asserting the dict and the `_t_` handlers agree.
+
+**Gates fold into their phase's doc.** A gate is a stop, and the useful
+content is the pre-approval checklist, which belongs beside the work that
+produced it. A test requires every gated playbook to carry an actual
+`- [ ]` checklist, so a gate doc cannot degrade into description.
 
 ---
 

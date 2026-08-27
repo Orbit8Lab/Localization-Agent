@@ -55,9 +55,15 @@ class LQAConfig:
     game: str
     source_lang: str
     locale: str
-    batch_size: int = 10
-    # docs/skills/lqa-batch-split.md: story text (dialogue/marketing) gets
-    # small Tier-3 batches — voice/continuity review needs a small window.
+    # docs/skills/lqa-batch-split.md is the spec for both of these: pure
+    # strings n=20 (short, independent items — large batches are safe),
+    # story text n=5 (voice/continuity review needs a small window).
+    # `batch_size` was 10 while the doc said 20, and because the Controller
+    # constructs LQAConfig without overriding it, the MAIN pipeline ran
+    # Tier-3 at 10 while the external-audit path (external_lqa.py, which
+    # passes 20 explicitly) followed the spec. Pinned by
+    # tests/test_skill_docs.py so the two cannot drift again.
+    batch_size: int = 20
     batch_size_story: int = 5
     deterministic_only: bool = False      # T1+T2 only, zero LLM calls
     second_layer: bool = True
