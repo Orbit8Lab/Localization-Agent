@@ -111,7 +111,10 @@ def test_the_registry_and_the_handlers_agree():
     exists to stop, so they must not diverge."""
     import inspect
     source = inspect.getsource(ChatOrchestrator._tools)
-    declared = set(re.findall(r'"(\w+)":\s*self\._t_', source))
+    # Accept either quote style: this test is about the registry matching
+    # the handlers, not about how the dict happens to be formatted. A
+    # reformat failing a correct registry teaches people to ignore it.
+    declared = set(re.findall(r"['\"](\w+)['\"]:\s*self\._t_", source))
     assert declared == TOOLS, (
         f"registry/handler mismatch: only in dict {declared - TOOLS}, "
         f"only as handler {TOOLS - declared}")

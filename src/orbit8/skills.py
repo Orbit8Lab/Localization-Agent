@@ -84,12 +84,31 @@ class PromotionPolicy:
     staleness_limit: int = 500
 
     def __post_init__(self) -> None:
+        """Reject configurations that cannot mean what they appear to.
+
+        Every field is validated, not just the obvious rates. A policy is
+        set by hand or from a CLI flag during calibration, and the failure
+        modes here are silent rather than loud: `min_utility=2.0` is an
+        unsatisfiable floor that blocks every skill forever while looking
+        like a strict-but-reasonable setting, and `decay_window=0` makes
+        `rows[-0:]` the WHOLE history — the exact lifetime-scoring bug §6.5
+        exists to avoid, reintroduced through a config value.
+        """
         if not 0.0 <= self.min_g3_agreement <= 1.0:
             raise ValueError("min_g3_agreement is a rate in [0, 1]")
         if not 0.0 <= self.decay_floor <= 1.0:
             raise ValueError("decay_floor is a rate in [0, 1]")
+        # Utility is a product of factors each in [0, 1] (see utility_for),
+        # so it cannot exceed 1.0 — a floor above that is unreachable.
+        if not 0.0 <= self.min_utility <= 1.0:
+            raise ValueError("min_utility is a rate in [0, 1]")
         if self.min_samples < 1 or self.min_g3_reviewed < 1:
             raise ValueError("sample floors must be >= 1")
+        if self.decay_window < 1:
+            raise ValueError("decay_window must be >= 1 (0 would score the "
+                             "whole history, not a window)")
+        if self.staleness_limit < 1:
+            raise ValueError("staleness_limit must be >= 1")
 
 
 # ---------------------------------------------------------------- utility
@@ -118,6 +137,22 @@ class Utility:
         return self.g3_reviewed > 0
 
 
+def rows_for(rows: Sequence[dict], signature: str) -> List[dict]:
+    """The observations that actually belong to `signature`.
+
+    Every function here that takes a signature filters through this. The
+    alternative — trusting callers to pre-filter — already produced a real
+    bug: a healthy skill scoring 1.0 dropped to 0.111 when handed the full
+    log, because another signature's rejections were counted against it,
+    and `boundary_for` attributed that other signature's counter-examples
+    to it as a fabricated applicability boundary.
+
+    A row carries a LIST of signatures: one candidate can exhibit several
+    defect classes at once, and it is evidence about each of them.
+    """
+    return [row for row in rows if signature in row.get("signatures", ())]
+
+
 def _confidence(samples: int, target: int) -> float:
     """Saturating sample weight in [0, 1]. Deliberately not a hard cutoff:
     a cutoff makes one observation flip a skill from invisible to fully
@@ -135,7 +170,13 @@ def utility_for(rows: Sequence[dict], signature: str,
     calibration run sweep policy parameters over a fixed dataset without
     re-running Stage 4, which is the difference between a parameter sweep
     that takes minutes and one that costs API spend.
+
+    `rows` is filtered to `signature` here rather than trusted to arrive
+    pre-filtered — see `rows_for`. Taking a signature and ignoring it made
+    the full log a valid-looking argument that silently mixed every
+    signature's evidence together.
     """
+    rows = rows_for(rows, signature)
     applied = [r for r in rows if r["verdict"] in (ACCEPTED, REJECTED)]
     accepted = [r for r in applied if r["verdict"] == ACCEPTED]
 
@@ -199,9 +240,16 @@ class Boundary:
 
 
 def boundary_for(rows: Sequence[dict], signature: str) -> Boundary:
-    """Collect the counter-examples for one signature (§6.3)."""
+    """Collect the counter-examples for one signature (§6.3).
+
+    Filtered through `rows_for`: an unfiltered call attributed OTHER
+    signatures' failures to this one, which is the worst possible thing to
+    get wrong here — the boundary is what a human reviewer reads to decide
+    where a skill stops applying, and a fabricated one argues against a
+    skill using evidence that has nothing to do with it.
+    """
     cases: List[dict] = []
-    for row in rows:
+    for row in rows_for(rows, signature):
         reason = None
         if row["verdict"] == REJECTED:
             reason = "ratchet_rejected"
@@ -401,7 +449,7 @@ class SkillRegistry:
         caller passing the whole log get a confident answer about the wrong
         skill, with nothing at the call site to reveal it.
         """
-        rows = [r for r in rows if signature in r.get("signatures", ())]
+        rows = rows_for(rows, signature)
         applied = [r for r in rows if r["verdict"] in (ACCEPTED, REJECTED)]
         if not applied:
             return None

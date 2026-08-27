@@ -229,6 +229,49 @@ def test_utility_counts_distinct_strings_not_observations():
     assert utility_for(rows, "t/x", TEST_POLICY).samples == 1
 
 
+def test_utility_scores_only_the_named_signature():
+    """Handed the full log — the natural mistake — an unfiltered scorer
+    counted OTHER signatures' rejections against this one. A skill that
+    genuinely scores 1.0 came out at 0.111, blocked by failures that had
+    nothing to do with it."""
+    good = [_row(uid=f"g{n}", verdict=ACCEPTED, g3=G3_ACCEPTED,
+                 sig="terminology/x") for n in range(4)]
+    other = [_row(uid=f"b{n}", verdict=REJECTED, g3=G3_EDITED,
+                  sig="length/overflow") for n in range(8)]
+
+    scoped = utility_for(good, "terminology/x", TEST_POLICY)
+    full_log = utility_for(good + other, "terminology/x", TEST_POLICY)
+    assert full_log.score == scoped.score
+    assert full_log.accept_rate == 1.0
+    assert full_log.g3_agreement == 1.0
+
+
+def test_a_boundary_never_borrows_another_signatures_failures():
+    """The worst version of the same bug: the boundary is what a human
+    reads to decide where a skill stops applying, so a fabricated one
+    argues against a skill with evidence from a different defect class."""
+    good = [_row(uid=f"g{n}", verdict=ACCEPTED, g3=G3_ACCEPTED,
+                 sig="terminology/x") for n in range(4)]
+    other = [_row(uid=f"b{n}", verdict=REJECTED, sig="length/overflow")
+             for n in range(8)]
+    assert boundary_for(good + other, "terminology/x").is_empty
+
+
+def test_a_signature_absent_from_the_rows_scores_zero():
+    rows = [_row(uid="u0", verdict=ACCEPTED, sig="t/other")]
+    assert utility_for(rows, "t/missing", TEST_POLICY).samples == 0
+
+
+def test_a_multi_defect_candidate_is_evidence_for_each_signature():
+    """One candidate can exhibit several defect classes at once, and it is
+    evidence about every one of them — so the filter matches a LIST, not a
+    single value."""
+    row = _row(uid="u0", verdict=ACCEPTED, g3=G3_ACCEPTED)
+    row["signatures"] = ["t/x", "t/y"]
+    assert utility_for([row], "t/x", TEST_POLICY).samples == 1
+    assert utility_for([row], "t/y", TEST_POLICY).samples == 1
+
+
 def test_an_unreviewed_skill_cannot_reach_a_high_score():
     """§5.6 as arithmetic: without a human ruling, the score is damped so
     an unreviewed skill never outranks a reviewed one."""
@@ -384,6 +427,33 @@ def test_the_policy_rejects_impossible_rates():
         PromotionPolicy(decay_floor=-0.1)
     with pytest.raises(ValueError):
         PromotionPolicy(min_samples=0)
+
+
+def test_an_unreachable_utility_floor_is_rejected():
+    """Utility is a product of factors each in [0,1], so it never exceeds
+    1.0. A floor above that blocks every skill forever while looking like
+    a strict-but-reasonable setting — silent, which is the worst kind."""
+    with pytest.raises(ValueError):
+        PromotionPolicy(min_utility=2.0)
+    with pytest.raises(ValueError):
+        PromotionPolicy(min_utility=-0.1)
+
+
+def test_a_zero_decay_window_is_rejected():
+    """`rows[-0:]` is the WHOLE history — the lifetime-scoring bug §6.5
+    exists to prevent, reintroduced through a config value rather than
+    through code."""
+    with pytest.raises(ValueError):
+        PromotionPolicy(decay_window=0)
+    with pytest.raises(ValueError):
+        PromotionPolicy(staleness_limit=0)
+
+
+def test_no_utility_score_can_exceed_the_floor_range():
+    """Pins the assumption the min_utility bound rests on."""
+    rows = [_row(uid=f"u{n}", verdict=ACCEPTED, g3=G3_ACCEPTED)
+            for n in range(50)]
+    assert 0.0 <= utility_for(rows, "t/x", TEST_POLICY).score <= 1.0
 
 
 def test_the_shipped_defaults_promote_nothing_on_a_small_sample(tmp_path):
