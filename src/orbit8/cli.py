@@ -987,10 +987,73 @@ class _LiveStatus:
             print(final, flush=True)
 
 
+def _cmd_job_list(args) -> int:
+    """Answer "what am I running" without needing to know a job id first.
+
+    Every other command takes the job id as a required argument, so an
+    operator returning to a machine — or opening someone else's — had no
+    way to discover what was there short of reading the directory. Phase
+    and pending gate come from the artifact tree, the same authoritative
+    derivation `status` uses.
+    """
+    root = Path(args.root)
+    job_ids = _existing_jobs(root)
+    if not job_ids:
+        print(f"no jobs under {root}")
+        print(f"\nStart one:\n  uv run orbit8 job init {root} <job-id> \\\n"
+              f"      --game <name> --source <file> --source-lang zh \\\n"
+              f"      --targets <locales> --genre <genre>")
+        return 0
+
+    print(f"{'job':<24}{'phase':<14}{'gate':<6}next")
+    print("-" * 78)
+    for job_id in job_ids:
+        try:
+            stage = Job(root, job_id).derive()
+        except Exception as err:            # a damaged tree is still a job
+            print(f"{job_id:<24}{'?':<14}{'?':<6}unreadable: {err}")
+            continue
+        gate = stage.gate or "-"
+        detail = stage.action
+        if stage.target:
+            detail += f" [{stage.target}]"
+        print(f"{job_id:<24}{stage.phase:<14}{gate:<6}{detail[:34]}")
+    print(f"\n{len(job_ids)} job(s). Open one:  "
+          f"uv run orbit8 chat {root} <job-id> --by <name>")
+    return 0
+
+
+def _existing_jobs(root: Path) -> list:
+    """Job ids under `root`. A mistyped id is at least as likely as a
+    missing one, so naming what IS there turns a dead end into a fix."""
+    if not root.is_dir():
+        return []
+    return sorted(child.name for child in root.iterdir()
+                  if (child / "job.json").exists())
+
+
 def _cmd_chat(args) -> int:
     from datetime import datetime
     from .orchestrator import ChatOrchestrator
     job = Job(Path(args.root), args.job_id)
+    # Refuse to open a session on a job that does not exist. Without this
+    # the agent answers questions about a phantom job: `derive()` reports
+    # INTAKE/"waiting on intake form" for a missing tree exactly as it does
+    # for a real new one, the stage playbook loads, and the model states a
+    # phase it never verified. Every tool call then fails identically until
+    # the step budget runs out.
+    if not job.store.job_json.exists():
+        print(f"no job at {args.root}/{args.job_id}", file=sys.stderr)
+        print(f"\nCreate it first:\n"
+              f"  uv run orbit8 job init {args.root} {args.job_id} \\\n"
+              f"      --game <name> --source <file> --source-lang zh \\\n"
+              f"      --targets <locales> --genre <genre>\n",
+              file=sys.stderr)
+        existing = _existing_jobs(Path(args.root))
+        if existing:
+            print(f"Jobs under {args.root}: {', '.join(existing)}",
+                  file=sys.stderr)
+        return 2
     provider = OpenAICompatProvider(args.provider, model=args.model,
                                     api_key=args.api_key)
     factory = lambda locale: OpenAICompatProvider(
@@ -1321,6 +1384,12 @@ def main(argv=None) -> int:
 
     job = sub.add_parser("job", help="job-level commands")
     job_sub = job.add_subparsers(dest="job_command", required=True)
+    job_list = job_sub.add_parser(
+        "list", help="what jobs exist here, and where each one is")
+    job_list.add_argument("root", nargs="?", default="jobs",
+                          help="jobs root directory (default: ./jobs)")
+    job_list.set_defaults(func=_cmd_job_list)
+
     init = job_sub.add_parser("init", help="create a job from an intake form")
     init.add_argument("root", help="jobs root directory")
     init.add_argument("job_id")

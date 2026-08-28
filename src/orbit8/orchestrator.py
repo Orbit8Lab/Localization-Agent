@@ -39,6 +39,12 @@ from .skill_docs import SkillLibrary
 
 MAX_STEPS_PER_TURN = 14
 
+# How many times one tool may fail IDENTICALLY (same tool, same args, same
+# error) before the turn stops. Two, not one: a first retry is sometimes
+# reasonable (a transient read), but a second identical failure is proof
+# the inputs cannot produce a different outcome.
+REPEAT_FAILURE_LIMIT = 2
+
 # The context budget. Owned in ONE place (context.ContextAssembler) rather
 # than emerging from constants that never knew about each other: before
 # this, SYSTEM (~2.7k) + OBSERVATION_LIMIT × MAX_STEPS_PER_TURN could reach
@@ -861,6 +867,8 @@ class ChatOrchestrator:
         # straight to history (as this loop used to) put the very thing the
         # model was called about into the lowest, non-trimmable tier.
         evidence: List[str] = []
+        # (tool, args, error) -> how many times it has failed identically.
+        repeats: Dict[tuple, int] = {}
         for _ in range(MAX_STEPS_PER_TURN):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
@@ -909,6 +917,36 @@ class ChatOrchestrator:
             evidence.append(
                 f"[tool] {call.tool}"
                 f"({json.dumps(call.args, default=str)}) -> {observation}")
+
+            # Circuit breaker. Re-issuing a call that just failed the same
+            # way cannot succeed — the inputs are identical — so repeating
+            # it only burns the step budget and ends in a generic
+            # "step limit" message that hides the actual error. Observed:
+            # 14 identical `status` calls against a missing job, ~70s, and
+            # the operator never saw the error that explained it.
+            # Tools report failure two ways: by raising (caught above into
+            # `failed`) and by RETURNING an "error: …" string, which most
+            # of them do. Counting only exceptions would leave the second
+            # kind looping exactly as before.
+            outcome = failed or (observation
+                                 if observation.startswith("error:")
+                                 else None)
+            if outcome is not None:
+                signature = (call.tool,
+                             json.dumps(call.args, sort_keys=True,
+                                        default=str), outcome)
+                repeats[signature] = repeats.get(signature, 0) + 1
+                if repeats[signature] >= REPEAT_FAILURE_LIMIT:
+                    reply = (
+                        f"Stopping: `{call.tool}` failed the same way "
+                        f"{repeats[signature]} times and retrying cannot "
+                        f"change that.\n\n{observation}")
+                    self._retire_evidence(evidence)
+                    self.history.append(("operator", user_msg))
+                    self.history.append(("orbit8", reply))
+                    self._trace("abort", reason="repeated_failure",
+                                tool=call.tool, error=outcome)
+                    return reply
         self._retire_evidence(evidence)
         self.history.append(("operator", user_msg))
         reply = ("I hit the per-turn step limit before finishing — the job "
