@@ -15,9 +15,10 @@ from __future__ import annotations
 import pytest
 
 from orbit8.context import (Block, ContextAssembler, Elision, MIN_TRIM_TOKENS,
-                            PROTECTED, TIER_EPISODIC, TIER_EVIDENCE,
-                            TIER_HISTORY, TIER_PLAYBOOK, TIER_SYSTEM,
-                            TIER_TASK, estimate_tokens, history_blocks)
+                            PROTECTED, REQUEST_LABEL, TIER_EPISODIC,
+                            TIER_EVIDENCE, TIER_HISTORY, TIER_PLAYBOOK,
+                            TIER_SYSTEM, TIER_TASK, estimate_tokens,
+                            history_blocks)
 
 
 def _block(tier, tokens=100, label="", trimmable=False, order=0) -> Block:
@@ -83,7 +84,10 @@ def test_history_is_dropped_before_evidence():
 def test_the_oldest_history_goes_first():
     """The previous `history[-30:]` dropped by COUNT regardless of size and
     never said it had. Order is by recency, and the loss is reported."""
-    assembler = ContextAssembler(budget_tokens=90, reserve_tokens=0)
+    # Room for exactly one of the two, so recency has to decide.
+    assembler = ContextAssembler(
+        budget_tokens=90 + ContextAssembler.NOTICE_RESERVE_TOKENS,
+        reserve_tokens=0)
     result = assembler.assemble([
         _block(TIER_HISTORY, 60, "oldest", order=0),
         _block(TIER_HISTORY, 60, "newest", order=9)])
@@ -97,7 +101,9 @@ def test_the_playbook_yields_before_the_conversation_is_gutted():
     # EQUAL-sized blocks, so only the TIER can decide which survives — a
     # size difference here would let the test pass without the tier logic
     # working at all.
-    assembler = ContextAssembler(budget_tokens=250, reserve_tokens=0)
+    assembler = ContextAssembler(
+        budget_tokens=250 + ContextAssembler.NOTICE_RESERVE_TOKENS,
+        reserve_tokens=0)
     result = assembler.assemble([
         _block(TIER_EVIDENCE, 100, "evidence"),
         _block(TIER_PLAYBOOK, 100, "playbook"),
@@ -114,7 +120,26 @@ def test_a_zero_or_negative_budget_is_refused():
 def test_the_reply_reserve_is_held_back():
     """A budget spent entirely on input leaves nothing to answer with."""
     assembler = ContextAssembler(budget_tokens=1000, reserve_tokens=900)
-    assert assembler.usable == 100
+    assert assembler.usable == 100 - ContextAssembler.NOTICE_RESERVE_TOKENS
+
+
+def test_a_starved_budget_is_detectable():
+    """When reservations eat the whole budget, `usable` clamps to 1 and
+    assembly degenerates silently: nothing clears MIN_TRIM_TOKENS so the
+    trim path never runs, and protected blocks pass through whole. That
+    looks identical to broken trimming, so it needs a name."""
+    starved = ContextAssembler(budget_tokens=1000, reserve_tokens=995)
+    assert starved.starved
+    assert not ContextAssembler(budget_tokens=10_000,
+                                reserve_tokens=100).starved
+
+
+def test_the_context_notice_has_reserved_room():
+    """The notice is appended AFTER selection, so it is outside every
+    block's allowance. Unreserved, it spent budget nobody accounted for —
+    the exact class of bug this module exists to remove."""
+    assembler = ContextAssembler(budget_tokens=1000, reserve_tokens=0)
+    assert assembler.usable == 1000 - ContextAssembler.NOTICE_RESERVE_TOKENS
 
 
 # ------------------------------------- the invariant: nothing vanishes
@@ -138,6 +163,45 @@ def test_a_complete_context_carries_no_notice():
     result = assembler.assemble([_block(TIER_TASK, 10, "task")])
     assert "CONTEXT NOTICE" not in result.text
     assert result.complete
+
+
+def test_the_trim_marker_is_paid_for_out_of_the_allowance():
+    """The marker is part of what gets sent, so it comes OUT of the
+    allowance. Sizing the head to the full allowance and then appending
+    the marker pushed the block back over budget — worst near
+    MIN_TRIM_TOKENS, where the marker is a large share of the whole."""
+    assembler = ContextAssembler(budget_tokens=MIN_TRIM_TOKENS + 100,
+                                 reserve_tokens=0)
+    block = Block(tier=TIER_EVIDENCE, text="data " * 5000, label="big",
+                  trimmable=True)
+    trimmed, _dropped = assembler._trim(block, assembler.usable)
+    assert trimmed.tokens(estimate_tokens) <= assembler.usable
+
+
+def test_the_request_is_rendered_last_whatever_its_tier():
+    """Tier order decides what SURVIVES; it should not decide what the
+    model reads last. The request is pinned to the end so the notice can
+    sit beside it."""
+    assembler = ContextAssembler(budget_tokens=100_000, reserve_tokens=0)
+    result = assembler.assemble([
+        Block(tier=TIER_EVIDENCE, order=10_000, label=REQUEST_LABEL,
+              text="THE-REQUEST"),
+        Block(tier=TIER_EVIDENCE, order=0, label="e0", text="EVIDENCE"),
+        Block(tier=TIER_TASK, text="TASK")])
+    assert result.text.index("EVIDENCE") < result.text.index("THE-REQUEST")
+    assert result.text.rstrip().endswith("THE-REQUEST")
+
+
+def test_the_notice_sits_immediately_after_the_request():
+    """Recency is the point: a notice buried mid-context is one the model
+    is least likely to honour."""
+    assembler = ContextAssembler(budget_tokens=200, reserve_tokens=0)
+    result = assembler.assemble([
+        Block(tier=TIER_EVIDENCE, order=10_000, label=REQUEST_LABEL,
+              text="THE-REQUEST"),
+        _block(TIER_HISTORY, 200, "dropped")])
+    assert result.text.index("THE-REQUEST") < result.text.index(
+        "CONTEXT NOTICE")
 
 
 def test_a_trimmed_block_says_so_at_the_cut():

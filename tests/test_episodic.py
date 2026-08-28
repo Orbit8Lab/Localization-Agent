@@ -116,6 +116,62 @@ def test_a_failed_call_is_recalled_with_its_failure(tmp_path):
     assert "failed" in episode.describe()
 
 
+def test_the_failure_key_the_tracer_actually_writes_is_read(tmp_path):
+    """The trace writes the reason as `error` (orchestrator._trace), and
+    this reader looked only for `failed` — so every failure reason was
+    silently dropped. The single most valuable thing to recall, lost to a
+    key mismatch between two files nobody read together."""
+    _trace(tmp_path / "t" / "s.jsonl", [
+        {"event": "tool", "turn": 1, "tool": "inspect_file",
+         "args": {"path": "missing.po"},
+         "error": "FileNotFoundError: missing.po"}])
+    episode, = EpisodicMemory(tmp_path / "t").recent()
+    assert episode.failed == "FileNotFoundError: missing.po"
+
+
+def test_the_real_tracer_output_round_trips(tmp_path):
+    """Pins the two modules together: written by the orchestrator's own
+    tracer, read back here. A key rename on either side fails this."""
+    from orbit8.orchestrator import ChatOrchestrator
+
+    trace = tmp_path / "t" / "live.jsonl"
+    trace.parent.mkdir(parents=True)
+    session = ChatOrchestrator.__new__(ChatOrchestrator)
+    session.trace, session.trace_path, session.turn_no = [], trace, 3
+    session._trace("tool", tool="compare_po",
+                   args={"old": "a.po", "new": "b.po"},
+                   result="…", error="ValueError: bad path")
+
+    episode, = EpisodicMemory(tmp_path / "t").recent()
+    assert episode.tool == "compare_po"
+    assert episode.turn == 3
+    assert episode.failed == "ValueError: bad path"
+
+
+@pytest.mark.parametrize("record", [
+    {"event": "tool", "turn": "not-a-number", "tool": "flagged", "args": {}},
+    {"event": "tool", "turn": None, "tool": "flagged", "args": {}},
+    {"event": "tool", "turn": 1, "tool": "flagged", "args": "not-a-dict"},
+    {"event": "tool", "turn": 1, "tool": "flagged", "args": None},
+])
+def test_a_malformed_field_does_not_abort_the_whole_file(tmp_path, record):
+    """A trace is a best-effort debugging artifact. One bad field must not
+    make every other record in the file unreadable."""
+    _trace(tmp_path / "t" / "s.jsonl",
+           [record, _tool(2, "compare_po", old="a.po", new="b.po")])
+    episodes = EpisodicMemory(tmp_path / "t").recent(limit=10)
+    assert len(episodes) == 2
+
+
+def test_a_non_dict_record_is_skipped(tmp_path):
+    path = tmp_path / "t" / "s.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('["a list, not a record"]\n'
+                    + json.dumps(_tool(1, "flagged", locale="ko")) + "\n",
+                    encoding="utf-8")
+    assert len(EpisodicMemory(tmp_path / "t").recent(limit=10)) == 1
+
+
 # ------------------------------------------------------- job scoping
 
 def test_recall_never_crosses_into_another_job(tmp_path):

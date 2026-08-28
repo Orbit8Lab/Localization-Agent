@@ -29,9 +29,9 @@ from pydantic import Field
 
 from .controller import GATE_NAMES, Job
 from .llm import Provider, complete_json
-from .context import (Block, ContextAssembler, TIER_EPISODIC, TIER_EVIDENCE,
-                      TIER_PLAYBOOK, TIER_SYSTEM, TIER_TASK, estimate_tokens,
-                      history_blocks)
+from .context import (Block, ContextAssembler, REQUEST_LABEL, TIER_EPISODIC,
+                      TIER_EVIDENCE, TIER_PLAYBOOK, TIER_SYSTEM, TIER_TASK,
+                      estimate_tokens, history_blocks)
 from .episodic import EpisodicMemory
 from .memory import RunDB
 from .schemas import IntakeBrief, Strict
@@ -805,7 +805,7 @@ class ChatOrchestrator:
 
         blocks.extend(history_blocks(self.history))
         blocks.append(Block(
-            tier=TIER_EVIDENCE, order=10_000, label="request",
+            tier=TIER_EVIDENCE, order=10_000, label=REQUEST_LABEL,
             text=f"[operator] {user_msg}\nNext step — ONE JSON tool call:"))
         return self.assembler.assemble(blocks)
 
@@ -837,22 +837,42 @@ class ChatOrchestrator:
         except OSError:
             pass                    # tracing must never break a session
 
+    def _retire_evidence(self, evidence: List[str]) -> None:
+        """Move this turn's tool results down into history.
+
+        Evidence is 'what happened THIS turn' — once the turn is answered
+        it becomes conversation, and the next turn's tool results take the
+        high tier. Without this every past turn's output would keep
+        outranking the current one forever.
+        """
+        for item in evidence:
+            self.history.append(("tool", item))
+        evidence.clear()
+
     def turn(self, user_msg: str) -> str:
         """One operator message → tool calls → one reply."""
         self.turn_no += 1
         self._trace("operator", message=user_msg)
         tools = self._tools()
         pending_user = user_msg
+        # THIS turn's tool results. They ride the EVIDENCE tier while the
+        # turn is live — outranking history and trimmable under pressure —
+        # and are demoted into history once the turn ends. Appending them
+        # straight to history (as this loop used to) put the very thing the
+        # model was called about into the lowest, non-trimmable tier.
+        evidence: List[str] = []
         for _ in range(MAX_STEPS_PER_TURN):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
             call = complete_json(self.provider, SYSTEM,
-                                 self._transcript(pending_user), ToolCall,
+                                 self._transcript(pending_user, evidence),
+                                 ToolCall,
                                  temperature=0.0, max_tokens=1200)
             self._trace("decide", tool=call.tool, args=call.args,
                         seconds=round(time.monotonic() - think_started, 2))
             if call.tool == "respond":
                 reply = call.message or "(empty reply)"
+                self._retire_evidence(evidence)
                 self.history.append(("operator", user_msg))
                 self.history.append(("orbit8", reply))
                 self._trace("respond", message=reply)
@@ -886,9 +906,10 @@ class ChatOrchestrator:
                       f"describe what is not visible above; narrow the "
                       f"request or page with offset/limit.]")
             self.on_action(call.tool, observation)
-            self.history.append(
-                ("tool", f"{call.tool}({json.dumps(call.args, default=str)})"
-                         f" -> {observation}"))
+            evidence.append(
+                f"[tool] {call.tool}"
+                f"({json.dumps(call.args, default=str)}) -> {observation}")
+        self._retire_evidence(evidence)
         self.history.append(("operator", user_msg))
         reply = ("I hit the per-turn step limit before finishing — the job "
                  "state is unchanged beyond the steps shown above. Ask me "

@@ -154,6 +154,11 @@ class AssembledContext:
                 + "; ".join(e.describe() for e in self.elisions))
 
 
+# The block holding the operator's current message. Named here rather than
+# spelled as a literal in two modules, so the renderer's "pin this last"
+# rule cannot drift from the label the orchestrator actually assigns.
+REQUEST_LABEL = "request"
+
 # Minimum tokens a trimmable block keeps before it is dropped outright.
 # Below this a "trimmed" result is a fragment that cannot inform anything,
 # and pretending otherwise wastes budget on noise.
@@ -179,9 +184,30 @@ class ContextAssembler:
         # input leaves nothing to answer with.
         self.reserve_tokens = reserve_tokens
 
+    # The CONTEXT NOTICE is appended after selection, so it is not part of
+    # any block's allowance. Small and bounded, but "spends budget nobody
+    # accounted for" is precisely the class of bug this module exists to
+    # remove, so it is reserved up front rather than discovered later.
+    NOTICE_RESERVE_TOKENS = 60
+
     @property
     def usable(self) -> int:
-        return max(1, self.budget_tokens - self.reserve_tokens)
+        """Budget left for content after the reply and notice reservations.
+
+        Clamped to >= 1 so assembly never divides by zero, but a value that
+        small means the reservations have eaten the entire budget — every
+        block then looks unfittable, the trim path is skipped (nothing
+        clears MIN_TRIM_TOKENS), and protected blocks pass through whole.
+        `starved` names that state so it can be asserted on rather than
+        discovered as mysterious over-budget output.
+        """
+        return max(1, self.budget_tokens - self.reserve_tokens
+                   - self.NOTICE_RESERVE_TOKENS)
+
+    @property
+    def starved(self) -> bool:
+        """True when reservations leave no room to assemble anything."""
+        return self.usable < MIN_TRIM_TOKENS
 
     def assemble(self, blocks: Sequence[Block]) -> AssembledContext:
         ordered = sorted(blocks, key=lambda b: (b.tier, -b.order))
@@ -234,7 +260,16 @@ class ContextAssembler:
         full = block.tokens(self.estimator)
         # Convert the token allowance back to characters conservatively.
         ratio = len(block.text) / max(1, full)
-        keep_chars = max(1, int(allowance * ratio * 0.9))
+        # The marker is part of what gets sent, so it has to come OUT of
+        # the allowance. Sizing the head to the full allowance and then
+        # appending the marker pushed the block back over budget — worst
+        # near MIN_TRIM_TOKENS, where the marker is a large fraction of the
+        # whole allowance and the overshoot distorts every later selection.
+        marker_cost = self.estimator(
+            "\n…[TRUNCATED: ~000000 tokens not shown. Do NOT describe "
+            "content beyond this point — request it explicitly.]")
+        head_allowance = max(1, allowance - marker_cost)
+        keep_chars = max(1, int(head_allowance * ratio * 0.9))
         head = block.text[:keep_chars]
         dropped = full - self.estimator(head)
         marker = (f"\n…[TRUNCATED: ~{max(0, dropped)} tokens not shown. "
@@ -246,10 +281,21 @@ class ContextAssembler:
 
     @staticmethod
     def _render(kept: Sequence[Block], elisions: Sequence[Elision]) -> str:
-        parts = [b.text for b in kept if b.text.strip()]
+        """Render kept blocks, with the request and the notice last.
+
+        Selection order is by TIER, which is right for deciding what
+        survives and wrong for deciding what the model reads last. The
+        current request is pinned to the end regardless of its tier, and
+        the notice sits immediately after it — the claim "adjacent to the
+        request" was previously just a comment, and tier ordering could put
+        the request in the middle with the notice paragraphs away.
+        """
+        body = [b.text for b in kept
+                if b.label != REQUEST_LABEL and b.text.strip()]
+        request = [b.text for b in kept
+                   if b.label == REQUEST_LABEL and b.text.strip()]
+        parts = body + request
         if elisions:
-            # The notice goes LAST, adjacent to the current request, where
-            # recency makes it most likely to be honored.
             notice = "; ".join(e.describe() for e in elisions)
             parts.append(
                 f"[CONTEXT NOTICE — your view is partial: {notice}. "

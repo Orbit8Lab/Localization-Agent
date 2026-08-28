@@ -101,13 +101,30 @@ class EpisodicMemory:
                     record = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
+                if not isinstance(record, dict):
+                    continue
                 if record.get("event") not in RECALLABLE:
                     continue
+                # The trace writes the failure reason as `error`
+                # (orchestrator._trace). Reading only `failed` silently
+                # dropped every one of them — and a failed call is the most
+                # valuable thing here, because repeating it verbatim is the
+                # most common wasted turn. `failed` stays accepted so
+                # hand-written or older traces still read.
+                reason = record.get("error") or record.get("failed")
+                # Coerce defensively: a trace is a best-effort debugging
+                # artifact, and one malformed field must not abort the read
+                # of every other record in the file.
+                try:
+                    turn = int(record.get("turn", 0))
+                except (TypeError, ValueError):
+                    turn = 0
+                args = record.get("args")
                 episodes.append(Episode(
-                    session=path.stem, turn=int(record.get("turn", 0)),
+                    session=path.stem, turn=turn,
                     tool=str(record.get("tool", "?")),
-                    args=record.get("args") or {},
-                    failed=record.get("failed")))
+                    args=args if isinstance(args, dict) else {},
+                    failed=str(reason) if reason else None))
         return episodes
 
     def recall(self, query: str, *, limit: int = 6,
