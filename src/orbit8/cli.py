@@ -1020,10 +1020,15 @@ def _cmd_chat(args) -> int:
     skills = SkillLibrary.load(
         default_skills_dir(),
         known_tools=set(ChatOrchestrator.tool_names()), strict=False)
+    # Episodic memory over THIS job's traces only (never across jobs — a
+    # cross-job read is a cross-tenant read; see episodic.py).
+    from .episodic import EpisodicMemory
+    episodic = EpisodicMemory(job.store.job_dir / "chat-traces",
+                              job_id=args.job_id)
     chat = ChatOrchestrator(
         job, provider, operator=args.by, provider_factory=factory,
         dry_run=args.dry_run, on_action=on_action, on_start=on_start,
-        trace_path=trace_path, skills=skills)
+        trace_path=trace_path, skills=skills, episodic=episodic)
     print(f"orbit8 chat — job {args.job_id}, operator {args.by}")
     stage = job.derive()
     active = skills.for_stage(stage.phase, stage.gate)

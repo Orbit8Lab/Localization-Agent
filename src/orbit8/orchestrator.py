@@ -23,17 +23,58 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from pydantic import Field
 
 from .controller import GATE_NAMES, Job
 from .llm import Provider, complete_json
+from .context import (Block, ContextAssembler, REQUEST_LABEL, TIER_EPISODIC,
+                      TIER_EVIDENCE, TIER_PLAYBOOK, TIER_SYSTEM, TIER_TASK,
+                      estimate_tokens, history_blocks)
+from .episodic import EpisodicMemory
 from .memory import RunDB
 from .schemas import IntakeBrief, Strict
 from .skill_docs import SkillLibrary
 
 MAX_STEPS_PER_TURN = 14
+
+# The context budget. Owned in ONE place (context.ContextAssembler) rather
+# than emerging from constants that never knew about each other: before
+# this, SYSTEM (~2.7k) + OBSERVATION_LIMIT × MAX_STEPS_PER_TURN could reach
+# ~50k tokens with history on top, and nothing in the code could say so.
+#
+# 100k is a deliberately CONSERVATIVE flat value: every current model
+# serves at least this, so the budget can never promise room the API
+# refuses. It is not this pipeline's default model's actual window — that
+# number is not recorded anywhere in the codebase, and guessing it here
+# would put a second unmeasured constant into a system whose whole
+# complaint is unmeasured constants. Raise it per-model (or make it
+# provider-derived) once the real window is known; `over_budget` on the
+# assembled result is the signal if it is ever set too high.
+CONTEXT_BUDGET_TOKENS = 100_000
+REPLY_RESERVE_TOKENS = 2_000      # headroom for the model's own answer
+
+
+def context_budget() -> int:
+    """The token budget, overridable via ``$ORBIT8_CONTEXT_BUDGET``.
+
+    An env override exists because this number is provisional: it should
+    track the model's real window, and changing that must not require
+    editing source. An unparseable or non-positive value falls back to the
+    conservative default rather than raising — a bad env var should not
+    make the chat interface unusable.
+    """
+    import os
+    raw = os.environ.get("ORBIT8_CONTEXT_BUDGET")
+    if not raw:
+        return CONTEXT_BUDGET_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        return CONTEXT_BUDGET_TOKENS
+    return value if value > 0 else CONTEXT_BUDGET_TOKENS
+
 OBSERVATION_LIMIT = 12000         # chars of tool output fed back to the model
 # inspect_file's window must stay UNDER OBSERVATION_LIMIT: the outer cap
 # applies to the whole JSON envelope (filename, counts, offsets), so a
@@ -211,7 +252,9 @@ class ChatOrchestrator:
                  on_action: Optional[Callable[[str, str], None]] = None,
                  on_start: Optional[Callable[[str, dict], None]] = None,
                  trace_path: Optional[Path] = None,
-                 skills: Optional["SkillLibrary"] = None):
+                 skills: Optional["SkillLibrary"] = None,
+                 assembler: Optional[ContextAssembler] = None,
+                 episodic: Optional[EpisodicMemory] = None):
         self.job = job
         self.provider = provider
         self.operator = operator
@@ -226,6 +269,14 @@ class ChatOrchestrator:
         # rather than indistinguishable from a hang
         self.on_start = on_start or (lambda tool, args: None)
         self.history: List[tuple] = []      # (role, text)
+        # The Context Manager: ONE owner for what the model sees, replacing
+        # three constants that each capped a different thing and none of
+        # which knew the others existed. The system prompt is charged
+        # against the budget here because the provider sends it separately.
+        self.assembler = assembler or ContextAssembler(
+            budget_tokens=context_budget(),
+            reserve_tokens=REPLY_RESERVE_TOKENS + estimate_tokens(SYSTEM))
+        self.episodic = episodic
         # debugging surface: full tool args + untruncated results, in
         # memory for /debug and on disk for post-mortem (JSONL).
         self.trace: List[dict] = []
@@ -683,17 +734,89 @@ class ChatOrchestrator:
         except Exception:                      # pragma: no cover - guard
             return None
 
-    def _transcript(self, user_msg: str) -> str:
-        lines = []
+    def _task_block(self) -> Optional[str]:
+        """Where the job actually is, from the artifact tree.
+
+        Tier 1 — outranks even this turn's evidence, because a large tool
+        result must never be able to push out the agent's knowledge of
+        which stage it is in. An agent that forgets the stage calls the
+        wrong stage's actions, and does it confidently.
+        """
+        try:
+            stage = self.job.derive()
+        except Exception:                      # pragma: no cover - guard
+            return None
+        line = f"[job state] phase={stage.phase} action={stage.action}"
+        if stage.gate:
+            line += (f" — WAITING on {stage.gate} "
+                     f"({GATE_NAMES.get(stage.gate, '')}); only a human "
+                     f"approval clears it")
+        if stage.target:
+            line += f" locale={stage.target}"
+        return line
+
+    def _episodic_block(self, user_msg: str) -> Optional[str]:
+        """What earlier sessions of THIS job did, when the request refers
+        back to something. Scoped to the job directory — never across
+        jobs (see episodic.py)."""
+        if self.episodic is None:
+            return None
+        try:
+            episodes = self.episodic.recall(user_msg,
+                                            exclude=self.trace_path)
+            return self.episodic.as_block_text(episodes) or None
+        except Exception:                      # pragma: no cover - guard
+            return None
+
+    def build_context(self, user_msg: str,
+                      evidence: Optional[Sequence[str]] = None):
+        """Assemble one call's context under an owned token budget.
+
+        This replaces three independent limits that never knew about each
+        other — `history[-30:]`, a per-result `OBSERVATION_LIMIT`, and the
+        reply's `max_tokens`. Their sum could reach ~50k tokens with
+        nothing in the code aware of it.
+        """
+        # SYSTEM is passed to the provider as its own argument, so it must
+        # NOT be rendered into this text — it would be sent twice. It still
+        # occupies the model's window, so it is charged to the budget as a
+        # reservation rather than a block. A budget that ignores the system
+        # prompt is short by ~2.7k tokens on every call.
+        blocks: List[Block] = []
+
+        task = self._task_block()
+        if task:
+            blocks.append(Block(tier=TIER_TASK, text=task, label="job-state"))
+
+        for index, item in enumerate(evidence or ()):
+            blocks.append(Block(
+                tier=TIER_EVIDENCE, text=item, label=f"evidence-{index}",
+                trimmable=True, order=index))
+
         playbook = self._playbook()
         if playbook:
-            lines.append(playbook)
-            lines.append("")
-        for role, text in self.history[-30:]:
-            lines.append(f"[{role}] {text}")
-        lines.append(f"[operator] {user_msg}")
-        lines.append("Next step — ONE JSON tool call:")
-        return "\n".join(lines)
+            blocks.append(Block(tier=TIER_PLAYBOOK, text=playbook,
+                                label="playbook"))
+
+        recalled = self._episodic_block(user_msg)
+        if recalled:
+            blocks.append(Block(tier=TIER_EPISODIC, text=recalled,
+                                label="episodic"))
+
+        blocks.extend(history_blocks(self.history))
+        blocks.append(Block(
+            tier=TIER_EVIDENCE, order=10_000, label=REQUEST_LABEL,
+            text=f"[operator] {user_msg}\nNext step — ONE JSON tool call:"))
+        return self.assembler.assemble(blocks)
+
+    def _transcript(self, user_msg: str,
+                    evidence: Optional[Sequence[str]] = None) -> str:
+        context = self.build_context(user_msg, evidence)
+        if context.elisions:
+            self._trace("context", tokens=context.tokens,
+                        elisions=[e.describe() for e in context.elisions],
+                        over_budget=context.over_budget)
+        return context.text
 
     def _trace(self, event: str, **fields) -> None:
         """Append one JSONL record to the session trace. The trace is the
@@ -714,22 +837,42 @@ class ChatOrchestrator:
         except OSError:
             pass                    # tracing must never break a session
 
+    def _retire_evidence(self, evidence: List[str]) -> None:
+        """Move this turn's tool results down into history.
+
+        Evidence is 'what happened THIS turn' — once the turn is answered
+        it becomes conversation, and the next turn's tool results take the
+        high tier. Without this every past turn's output would keep
+        outranking the current one forever.
+        """
+        for item in evidence:
+            self.history.append(("tool", item))
+        evidence.clear()
+
     def turn(self, user_msg: str) -> str:
         """One operator message → tool calls → one reply."""
         self.turn_no += 1
         self._trace("operator", message=user_msg)
         tools = self._tools()
         pending_user = user_msg
+        # THIS turn's tool results. They ride the EVIDENCE tier while the
+        # turn is live — outranking history and trimmable under pressure —
+        # and are demoted into history once the turn ends. Appending them
+        # straight to history (as this loop used to) put the very thing the
+        # model was called about into the lowest, non-trimmable tier.
+        evidence: List[str] = []
         for _ in range(MAX_STEPS_PER_TURN):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
             call = complete_json(self.provider, SYSTEM,
-                                 self._transcript(pending_user), ToolCall,
+                                 self._transcript(pending_user, evidence),
+                                 ToolCall,
                                  temperature=0.0, max_tokens=1200)
             self._trace("decide", tool=call.tool, args=call.args,
                         seconds=round(time.monotonic() - think_started, 2))
             if call.tool == "respond":
                 reply = call.message or "(empty reply)"
+                self._retire_evidence(evidence)
                 self.history.append(("operator", user_msg))
                 self.history.append(("orbit8", reply))
                 self._trace("respond", message=reply)
@@ -763,9 +906,10 @@ class ChatOrchestrator:
                       f"describe what is not visible above; narrow the "
                       f"request or page with offset/limit.]")
             self.on_action(call.tool, observation)
-            self.history.append(
-                ("tool", f"{call.tool}({json.dumps(call.args, default=str)})"
-                         f" -> {observation}"))
+            evidence.append(
+                f"[tool] {call.tool}"
+                f"({json.dumps(call.args, default=str)}) -> {observation}")
+        self._retire_evidence(evidence)
         self.history.append(("operator", user_msg))
         reply = ("I hit the per-turn step limit before finishing — the job "
                  "state is unchanged beyond the steps shown above. Ask me "
