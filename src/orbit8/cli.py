@@ -987,6 +987,95 @@ class _LiveStatus:
             print(final, flush=True)
 
 
+def _cmd_new(args) -> int:
+    """Describe a project in prose; a model proposes the intake; you commit.
+
+    The confirmation step is not a courtesy. The intake form is the job's
+    constitution — `source_lang` and `target_locales` decide what every
+    later stage does — so the model's role stops at *proposing*. Nothing is
+    written until a human says yes, and validation runs before they are
+    asked, so an obviously wrong locale never reaches the prompt.
+    """
+    from .intake_wizard import propose_intake, render, review, to_intake
+
+    from .project_paths import discover_sources
+
+    root = Path(args.root)
+    sources = list(args.source or ())
+    if not sources:
+        # Discovery, not guessing: look under the project's 10-received/
+        # and SHOW what was found. A single unambiguous candidate is
+        # offered as a default; several are a question, because silently
+        # ingesting last month's drop builds a job that looks correct and
+        # translates the wrong text.
+        found = discover_sources(root)
+        for note in found.notes:
+            print(f"  {note}")
+        if found.found:
+            print(f"\nSource files under {found.project_root}:")
+            for index, candidate in enumerate(found.candidates, 1):
+                print(f"  {index}. {candidate.describe()}")
+            only = found.unambiguous
+            prompt = ("Use this source? [Y/n] " if only else
+                      f"Which source? [1-{len(found.candidates)}] ")
+            answer = input(f"\n{prompt}").strip().lower()
+            if only and answer in ("", "y", "yes"):
+                sources = [str(only.path)]
+            elif answer.isdigit() and 1 <= int(answer) <= len(
+                    found.candidates):
+                sources = [str(found.candidates[int(answer) - 1].path)]
+        if not sources:
+            print("\nNo source chosen. Pass one explicitly:\n"
+                  "  uv run orbit8 new <root> --source <file>",
+                  file=sys.stderr)
+            return 2
+
+    description = args.describe or input(
+        "Describe the project (game, source language, target locales, "
+        "genre):\n> ").strip()
+    if not description:
+        print("nothing to propose from", file=sys.stderr)
+        return 2
+
+    provider = OpenAICompatProvider(args.provider, model=args.model,
+                                    api_key=args.api_key)
+    print("proposing intake…")
+    result = propose_intake(provider, description,
+                            source_files=sources)
+
+    while True:
+        print(render(result, sources))
+        if not result.ok:
+            # Errors block creation rather than warn: these are the values
+            # the whole pipeline inherits, and "confirm anyway" would make
+            # the validation decorative.
+            print("\nFix the errors above (edit with --describe, or pass "
+                  "explicit flags to `orbit8 job init`).")
+            return 1
+        answer = input("\nCreate this job? [y/N/edit] ").strip().lower()
+        if answer in ("y", "yes"):
+            break
+        if answer in ("e", "edit"):
+            note = input("What should change? ").strip()
+            if note:
+                result = propose_intake(
+                    provider, f"{description}\n\nCorrection: {note}",
+                    source_files=sources)
+                continue
+        print("cancelled — nothing was created")
+        return 1
+
+    job = Job.init(root, result.proposal.job_id,
+                   intake=to_intake(result.proposal, tenant_id=args.tenant),
+                   source_files=sources,
+                   pilot_size=args.pilot_size)
+    print(f"\njob initialized: {job.store.job_dir}")
+    _print_stage(job.derive())
+    print(f"\nNext:  uv run orbit8 next {root} {result.proposal.job_id} "
+          f"--dry-run")
+    return 0
+
+
 def _cmd_job_list(args) -> int:
     """Answer "what am I running" without needing to know a job id first.
 
@@ -1384,6 +1473,23 @@ def main(argv=None) -> int:
 
     job = sub.add_parser("job", help="job-level commands")
     job_sub = job.add_subparsers(dest="job_command", required=True)
+    new = sub.add_parser(
+        "new",
+        help="describe a project in words; a model proposes the intake "
+             "form and you confirm it before anything is created")
+    new.add_argument("root", nargs="?", default="jobs",
+                     help="jobs root directory (default: ./jobs)")
+    new.add_argument("--describe", help="skip the prompt and pass the "
+                                        "description directly")
+    new.add_argument("--source", nargs="+", help="source files (.json/.po)")
+    new.add_argument("--tenant", default="default")
+    new.add_argument("--pilot-size", type=int, default=30)
+    new.add_argument("--provider", default="deepseek",
+                     choices=sorted(PROVIDER_PRESETS))
+    new.add_argument("--model")
+    new.add_argument("--api-key")
+    new.set_defaults(func=_cmd_new)
+
     job_list = job_sub.add_parser(
         "list", help="what jobs exist here, and where each one is")
     job_list.add_argument("root", nargs="?", default="jobs",
