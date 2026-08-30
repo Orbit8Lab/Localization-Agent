@@ -1007,7 +1007,14 @@ def _cmd_new(args) -> int:
 
     from .project_paths import discover_sources, scaffold_project
 
+    # `orbit8 new` takes the PROJECT folder; the jobs root is `jobs/`
+    # inside it. These are different things and conflating them breaks the
+    # file boundary: the project root is derived as the PARENT of the jobs
+    # root, so a job created directly under the project folder makes its
+    # parent (the folder holding every client's project) the agent's
+    # readable ground.
     root = Path(args.root)
+    jobs_root = root / "jobs"
     if not root.exists():
         root.mkdir(parents=True)
         print(f"created {root}")
@@ -1096,13 +1103,17 @@ def _cmd_new(args) -> int:
         print("cancelled — nothing was created")
         return 1
 
-    job = Job.init(root, result.proposal.job_id,
+    from .tenancy import mixed_tenant_warning
+    warning = mixed_tenant_warning(jobs_root, args.tenant)
+    if warning:
+        print(warning, file=sys.stderr)
+    job = Job.init(jobs_root, result.proposal.job_id,
                    intake=to_intake(result.proposal, tenant_id=args.tenant),
                    source_files=sources,
                    pilot_size=args.pilot_size)
     print(f"\njob initialized: {job.store.job_dir}")
     _print_stage(job.derive())
-    print(f"\nNext:  uv run orbit8 next {root} {result.proposal.job_id} "
+    print(f"\nNext:  uv run orbit8 next {jobs_root} {result.proposal.job_id} "
           f"--dry-run")
     return 0
 

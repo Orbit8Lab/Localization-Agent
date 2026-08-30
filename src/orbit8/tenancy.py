@@ -40,10 +40,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# How deep to look for a job.json when identifying a project's owner. A
-# project folder holds `jobs/<id>/job.json`, so two levels below the
-# candidate root is the normal case; three covers a nested layout.
-_MARKER_DEPTH = 3
+# How deep to look for a job.json when identifying a project's owner.
+# EXACTLY the depth of `jobs/<id>/job.json` — two levels. Searching deeper
+# makes a folder claim ownership through its grandchildren: a workspace
+# holding several clients' projects would resolve to whichever client's
+# job it found first, and that folder is precisely the one that must have
+# no owner (so cross-project reads are checked per project, not waved
+# through at the top).
+_MARKER_DEPTH = 2
 
 
 class TenantError(PermissionError):

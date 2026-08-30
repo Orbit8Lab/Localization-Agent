@@ -85,6 +85,27 @@ def test_a_scaffolded_folder_is_recognised_as_a_project(tmp_path):
     assert discover_sources(tmp_path).found
 
 
+def test_the_job_tree_belongs_under_jobs_not_beside_the_drops(tmp_path):
+    """`orbit8 new` takes the PROJECT folder; the jobs root is `jobs/`
+    inside it. Conflating them put the job tree beside 10-received/ — and
+    because the project root is derived as the PARENT of the jobs root,
+    that made the folder holding EVERY client's project the agent's
+    readable ground."""
+    from orbit8.project_paths import scaffold_project
+    from orbit8.tenancy import owner_of
+
+    project = tmp_path / "client-project"
+    scaffold_project(project)
+    job_dir = project / "jobs" / "the-job"
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text('{"tenant_id": "acme"}',
+                                      encoding="utf-8")
+
+    # the project folder — not its parent — is what owns the job
+    assert owner_of(project).tenant_id == "acme"
+    assert not owner_of(tmp_path).known
+
+
 # --------------------------------------------------------- the happy path
 
 def test_a_single_source_is_found(tmp_path):
