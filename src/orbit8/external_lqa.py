@@ -128,7 +128,7 @@ def run_external_lqa(job, provider: Optional[Provider], pairs_path: Path, *,
                                       if glossary else {})))
     ctx = LQAContext(provider=provider, cfg=cfg, run_db=db,
                      tm=TranslationMemory(job.store.tm_path()),
-                     glossary=glossary, style_brief=job._style(),
+                     glossary=glossary, style_brief=job._style_or_none(),
                      tenant=job._tenant())
     report = run_lqa_stage(ctx, job.job_id)
     job.store.write(5, f"lqa_report.{name}", report,

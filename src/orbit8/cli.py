@@ -1118,6 +1118,53 @@ def _cmd_new(args) -> int:
     return 0
 
 
+def _cmd_set_source(args) -> int:
+    """Point an existing job at its source file(s).
+
+    A job is routinely created before the strings exist — the folder is
+    made when the client signs, the drop arrives later — and a source
+    often has to be CONVERTED first (a .csv or .xlsx standardized into
+    flat JSON). Without this the only way to attach the result was to
+    delete the job and redo the intake, which throws away the gate
+    approvals and artifacts already earned.
+
+    Only `source_files` changes; the intake artifact and every approval
+    stay exactly as they were.
+    """
+    job = Job(Path(args.root), args.job_id)
+    if not job.store.job_json.exists():
+        print(f"no job at {args.root}/{args.job_id}", file=sys.stderr)
+        return 2
+
+    resolved = []
+    for raw in args.source:
+        path = Path(raw)
+        if not path.exists():
+            print(f"source file not found: {path}", file=sys.stderr)
+            return 2
+        resolved.append(str(path.resolve()))
+
+    control = job.control
+    previous = control.get("source_files") or []
+    if previous and not args.replace:
+        # Silently discarding a configured source would make a re-run
+        # ingest something different from what the artifacts record.
+        print(f"job already has {len(previous)} source file(s):",
+              file=sys.stderr)
+        for path in previous:
+            print(f"  {path}", file=sys.stderr)
+        print("pass --replace to change them", file=sys.stderr)
+        return 2
+
+    control["source_files"] = resolved
+    job.store.save_control(control)
+    print(f"source set for {args.job_id}:")
+    for path in resolved:
+        print(f"  {path}")
+    _print_stage(job.derive())
+    return 0
+
+
 def _cmd_job_list(args) -> int:
     """Answer "what am I running" without needing to know a job id first.
 
@@ -1538,12 +1585,30 @@ def main(argv=None) -> int:
                           help="jobs root directory (default: ./jobs)")
     job_list.set_defaults(func=_cmd_job_list)
 
+    set_source = job_sub.add_parser(
+        "set-source",
+        help="point an existing job at its source file(s) — for a job "
+             "created before the strings arrived, or after converting a "
+             "csv/xlsx with `standardize`")
+    set_source.add_argument("root", help="jobs root directory")
+    set_source.add_argument("job_id")
+    set_source.add_argument("source", nargs="+",
+                            help="source files (.json / .po / any format "
+                                 "the adapter-writer can handle)")
+    set_source.add_argument("--replace", action="store_true",
+                            help="overwrite sources already configured")
+    set_source.set_defaults(func=_cmd_set_source)
+
     init = job_sub.add_parser("init", help="create a job from an intake form")
     init.add_argument("root", help="jobs root directory")
     init.add_argument("job_id")
     init.add_argument("--game", required=True)
-    init.add_argument("--source", required=True, nargs="+",
-                      help="source files (.json / .po)")
+    # Optional, matching `orbit8 new`: a job with no strings yet is a valid
+    # state that waits at INTAKE, and only S1 needs the source. Attach one
+    # later with `orbit8 job set-source`.
+    init.add_argument("--source", nargs="+", default=[],
+                      help="source files (.json / .po); may be added later "
+                           "with `orbit8 job set-source`")
     init.add_argument("--source-lang", default="zh")
     init.add_argument("--targets", required=True,
                       help="comma-separated locales")

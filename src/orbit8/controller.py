@@ -40,7 +40,7 @@ from .schemas import (DomainLabels, GlossaryDelta, HealthReport, IngestReport,
                       IntakeBrief, LQAReport, MarketReport, MTPEQueue,
                       SourceBatch, StyleBrief, TestPlan, TranslateRunSummary,
                       UniqueString)
-from .store import JobStore
+from .store import ArtifactError, JobStore
 
 GATES = [("G0", "scope sign-off"), ("G1", "asset lock"),
          ("G2", "pilot sign-off"), ("G3", "flagged-strings review"),
@@ -243,6 +243,20 @@ class Job:
     def _style(self) -> StyleBrief:
         return self.store.read(2, "style_brief", StyleBrief)
 
+    def _style_or_none(self) -> Optional[StyleBrief]:
+        """The style brief when CONTEXT has run, else None.
+
+        An EXTERNAL LQA audit enters the pipeline at S5 — it reviews
+        translations somebody else produced, so it never runs INGEST or
+        CONTEXT and no s2 artifact exists. `LQAContext.style_brief` is
+        already Optional and the cascade handles None, so the hard read
+        was the only thing making a legitimate entry point impossible.
+        """
+        try:
+            return self._style()
+        except ArtifactError:
+            return None
+
     def _glossary(self, locale: str) -> Optional[Glossary]:
         """Post-G1 merged view: frozen T1 wins over tenant T2 genre layer."""
         import json
@@ -297,6 +311,37 @@ class Job:
                              produced_by="agent:adapter-writer@1",
                              model_fingerprint=fingerprint)
             return records
+        return fallback
+
+    def _bilingual_fallback(self, provider: Provider, dry_run: bool):
+        """The same contract for TRANSLATION PAIRS (key, source, target).
+
+        A bilingual xlsx/csv previously had no path in at all, while the
+        identical file as a source was handled — so a client sending
+        translations for review was blocked by an asymmetry rather than a
+        decision. Stored under a distinct artifact name: an adapter that
+        extracts one text column is not the one that extracts two.
+        """
+        from .codegen import (AdapterRecord, generate_bilingual_adapter,
+                              run_adapter, validate_pairs)
+
+        def fallback(path: Path):
+            name = f"bilingual_adapter{path.suffix.replace('.', '_')}"
+            if self.store.exists(1, name):
+                stored = self.store.read(1, name, AdapterRecord)
+                return run_adapter(stored.script, path,
+                                   validate=validate_pairs)
+            if dry_run:
+                raise ValueError(
+                    f"unsupported format {path.suffix!r} and dry-run cannot "
+                    f"generate an adapter — run without --dry-run once, or "
+                    f"convert the file to .po")
+            record, pairs, fingerprint = generate_bilingual_adapter(
+                provider, path)
+            self.store.write(1, name, record,
+                             produced_by="agent:bilingual-adapter-writer@1",
+                             model_fingerprint=fingerprint)
+            return pairs
         return fallback
 
     def _do_ingest(self, stage: Stage, provider: Provider,

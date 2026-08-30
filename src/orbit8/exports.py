@@ -82,8 +82,8 @@ def emit_flat_json(records: List[SourceString], path: Path) -> int:
 
 
 def emit_bilingual_jsonl(files: List[Path], path: Path, *,
-                         source_lang: str, target_lang: str
-                         ) -> Tuple[int, int]:
+                         source_lang: str, target_lang: str,
+                         fallback=None) -> Tuple[int, int]:
     """Pairs from target-language .po files (msgid→msgstr). Entries with
     empty msgstr are INCLUDED with an empty target — an untranslated
     string is exactly what a downstream LQA must flag, and an MT pass must
@@ -96,9 +96,23 @@ def emit_bilingual_jsonl(files: List[Path], path: Path, *,
     pairs, empty, identical = [], 0, 0
     for file in files:
         if Path(file).suffix.lower() != ".po":
-            raise ValueError(
-                f"bilingual export reads .po files (msgid/msgstr "
-                f"pairs); got {Path(file).name!r}")
+            # Non-.po formats go through the Adapter-Writer, the same way
+            # source ingest already does. Rejecting them outright meant a
+            # client sending an xlsx of translations for review had no way
+            # in at all, while the identical file as a SOURCE was handled
+            # fine — an asymmetry, not a decision.
+            if fallback is None:
+                raise ValueError(
+                    f"bilingual export reads .po natively; got "
+                    f"{Path(file).name!r}. Converting it needs the "
+                    f"adapter-writer — run without --dry-run.")
+            for key, source, target, location in fallback(Path(file)):
+                if not target.strip():
+                    empty += 1
+                elif source.strip() == target.strip():
+                    identical += 1
+                pairs.append((key, source, target, location))
+            continue
         for key, source, target, location in read_po_entries(Path(file)):
             if not target.strip():
                 empty += 1

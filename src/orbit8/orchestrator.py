@@ -471,7 +471,9 @@ class ChatOrchestrator:
             out = out_dir / name
             written, empty = emit_bilingual_jsonl(
                 files, out, source_lang=intake.source_lang,
-                target_lang=locale)
+                target_lang=locale,
+                fallback=self.job._bilingual_fallback(self.provider,
+                                                      self.dry_run))
             return json.dumps({"written": written,
                                "empty_targets_included": empty,
                                "path": str(out)})

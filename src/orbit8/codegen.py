@@ -176,9 +176,15 @@ def generate_converter(provider: Provider, path: Path, *,
         f"{path}; last error: {error}")
 
 
-def run_adapter(script: str, path: Path) -> List[SourceString]:
-    """Ingest wrapper (INCREMENTAL path)."""
-    return run_converter(script, path, validate_stdout)
+def run_adapter(script: str, path: Path, validate=None):
+    """Re-run a STORED adapter (INCREMENTAL path).
+
+    `validate` selects the contract: the default ingest one ({key, text}),
+    or `validate_pairs` for a bilingual adapter ({key, source, target}).
+    A stored script is re-run against the same wall it was generated
+    behind — reuse must not become a way around validation.
+    """
+    return run_converter(script, path, validate or validate_stdout)
 
 
 def generate_adapter(provider: Provider, path: Path
@@ -186,3 +192,78 @@ def generate_adapter(provider: Provider, path: Path
     """Ingest wrapper over the generic loop."""
     return generate_converter(provider, path, system_prompt=ADAPTER_SYSTEM,
                               validate=validate_stdout)
+
+
+# ---------------------------------------------- bilingual (LQA) adapters
+
+BILINGUAL_SYSTEM = (
+    "You write small Python adapters that extract TRANSLATION PAIRS from "
+    "a game-localization file, for quality review. Rules:\n"
+    "- Python 3 STDLIB ONLY (no pip installs; the sandbox has no network "
+    "and no site-packages). For .xlsx, unzip it and parse the XML with "
+    "zipfile + xml.etree — openpyxl is NOT available.\n"
+    "- The script receives the input file path as sys.argv[1].\n"
+    "- It must print to STDOUT one JSON array of objects, each exactly "
+    '{"key": "<id>", "source": "<source-language text>", '
+    '"target": "<translated text>"} — nothing else on stdout.\n'
+    "- Identify the SOURCE column and the TARGET column from the header. "
+    "The source is the language the game was written in; the target is "
+    "the translation being reviewed. If several translation columns "
+    "exist, choose the one named for the requested target language.\n"
+    "- Keep rows whose target is EMPTY (use an empty string): an "
+    "untranslated string is exactly what a review must flag, so dropping "
+    "it hides a defect.\n"
+    "- Skip rows with no source text. Preserve text verbatim — never "
+    "strip placeholders or markup.\n"
+    "- Keys must be unique and stable (use the file's own ids when "
+    "present; otherwise ROW_0001 style).\n"
+    "- Handle the file with encoding='utf-8', errors='replace'.\n"
+    "Output ONLY the Python code. No prose, no markdown fences."
+)
+
+
+def validate_pairs(stdout: str, file_ref: str) -> List[tuple]:
+    """Wall 2 for bilingual adapters: only validated pairs cross out.
+
+    Mirrors `validate_stdout`, with one deliberate difference — an EMPTY
+    target is kept rather than dropped. For ingest an empty string is
+    noise; for LQA it is the finding.
+    """
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"stdout is not valid JSON: {err}") from err
+    if not isinstance(data, list) or not data:
+        raise ValueError('expected a non-empty JSON array of '
+                         '{"key", "source", "target"} objects')
+    pairs, seen = [], set()
+    for i, item in enumerate(data):
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("key"), str)
+                or not isinstance(item.get("source"), str)
+                or not isinstance(item.get("target"), str)):
+            raise ValueError(
+                f'item {i} is not {{"key": str, "source": str, '
+                f'"target": str}}: {str(item)[:120]}')
+        if item["key"] in seen:
+            raise ValueError(f"duplicate key {item['key']!r} at item {i}")
+        seen.add(item["key"])
+        if item["source"].strip():
+            pairs.append((item["key"], item["source"], item["target"],
+                          file_ref))
+    if not pairs:
+        raise ValueError("no rows with source text")
+    return pairs
+
+
+def generate_bilingual_adapter(provider: Provider, path: Path):
+    """Adapter that extracts (key, source, target) pairs from any format.
+
+    The source path has had this since the Adapter-Writer existed; the
+    bilingual path hard-rejected everything but .po, so a client sending
+    an xlsx of translations for review had no way in at all. Same sandbox,
+    same generate-validate-retry loop, different contract.
+    """
+    return generate_converter(provider, path,
+                              system_prompt=BILINGUAL_SYSTEM,
+                              validate=validate_pairs)
