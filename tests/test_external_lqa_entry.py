@@ -372,6 +372,104 @@ def test_a_column_name_that_does_not_exist_is_reported(tmp_path):
     assert "Klingon" in str(excinfo.value)
 
 
+def _multi_locale_chat(tmp_path):
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+    job = Job.init(tmp_path / "proj" / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["zh-CN", "zh-TW",
+                                                      "ja", "ko"]),
+                   source_files=[])
+    return ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+
+
+def test_one_call_converts_every_locale(tmp_path):
+    """Reading the same sheet once per locale is waste. The OUTPUT stays
+    one file per locale because that is what the LQA cascade consumes —
+    T1 checks width against ONE target, T2 consistency within ONE locale
+    — but the input should be read once."""
+    _glossary(tmp_path)
+    result = json.loads(_multi_locale_chat(tmp_path)._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl", "source_column": "English",
+        "column_map": {"zh-CN": "简体中文", "zh-TW": "繁體中文",
+                       "ja": "日本語", "ko": "한국어"},
+        "out_name": "glossary"}))
+
+    assert result["status"] == "complete"
+    assert {row["locale"] for row in result["written"]} == {
+        "zh-CN", "zh-TW", "ja", "ko"}
+    assert all(row["written"] == 2 for row in result["written"])
+
+
+def test_each_locale_gets_its_own_correct_column(tmp_path):
+    """The failure this must not have: one adapter cached for `ja` being
+    reused for `ko` and quietly emitting Japanese."""
+    _glossary(tmp_path)
+    chat = _multi_locale_chat(tmp_path)
+    result = json.loads(chat._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl", "source_column": "English",
+        "column_map": {"ja": "日本語", "ko": "한국어"},
+        "out_name": "glossary"}))
+
+    by_locale = {}
+    for row in result["written"]:
+        first = json.loads(
+            Path(row["path"]).read_text(encoding="utf-8").splitlines()[0])
+        by_locale[row["locale"]] = first["target_text"]
+    assert by_locale["ja"] == "バリア"
+    assert by_locale["ko"] == "방벽"
+
+
+def test_no_model_call_is_needed_for_a_term_sheet(tmp_path):
+    """A named-column table is deterministic to read. Using a generated
+    adapter would key the cache by suffix while the script hardcodes one
+    language's column — the reuse bug above."""
+    _glossary(tmp_path)
+    chat = _multi_locale_chat(tmp_path)      # dry_run=True: no adapter
+    result = json.loads(chat._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl", "source_column": "English",
+        "column_map": {"ja": "日本語"}, "out_name": "g"}))
+    assert result["status"] == "complete"
+
+
+def test_one_bad_locale_does_not_cost_the_others(tmp_path):
+    """Per-locale failure: the operator needs to know which column to
+    fix, and the good ones should still be written."""
+    _glossary(tmp_path)
+    result = json.loads(_multi_locale_chat(tmp_path)._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl", "source_column": "English",
+        "column_map": {"ja": "日本語", "ko": "Klingon"},
+        "out_name": "glossary"}))
+
+    assert result["status"] == "partial"
+    assert [row["locale"] for row in result["written"]] == ["ja"]
+    assert any("Klingon" in message for message in result["failed"])
+
+
+def test_a_locale_outside_the_job_is_refused(tmp_path):
+    _glossary(tmp_path)
+    result = json.loads(_multi_locale_chat(tmp_path)._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl", "source_column": "English",
+        "column_map": {"fr": "Français"}, "out_name": "g"}))
+    assert result["status"] == "failed"
+    assert any("not a target locale" in m for m in result["failed"])
+
+
+def test_column_map_needs_a_source_column(tmp_path):
+    _glossary(tmp_path)
+    result = _multi_locale_chat(tmp_path)._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl",
+        "column_map": {"ja": "日本語"}})
+    assert "source_column" in result
+
+
 def test_standardize_requires_exactly_two_columns(tmp_path):
     _glossary(tmp_path)
     result = _chat(tmp_path)._t_standardize({

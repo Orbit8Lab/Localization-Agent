@@ -544,6 +544,146 @@ class ChatOrchestrator:
                 info["remaining_chars"] = len(text) - end
         return json.dumps(info, ensure_ascii=False)
 
+    @staticmethod
+    def _read_table(path: Path):
+        """(header, rows) from a spreadsheet, or None if not one.
+
+        Deterministic, no model call. A term sheet is a plain table with
+        named columns — using a generated adapter for it would key the
+        cache by file suffix while the script hardcodes one language's
+        column, so the ja adapter would be reused for ko and quietly emit
+        Japanese.
+        """
+        suffix = path.suffix.lower()
+        try:
+            if suffix in (".csv", ".tsv"):
+                import csv as _csv
+                with path.open("r", encoding="utf-8-sig", errors="replace",
+                               newline="") as handle:
+                    rows = list(_csv.reader(
+                        handle, delimiter="\t" if suffix == ".tsv" else ","))
+                return (rows[0], rows[1:]) if rows else None
+            if suffix in (".xlsx", ".xlsm"):
+                from openpyxl import load_workbook
+                book = load_workbook(path, read_only=True, data_only=True)
+                sheet = book[book.sheetnames[0]]
+                rows = [["" if cell is None else str(cell) for cell in row]
+                        for row in sheet.iter_rows(values_only=True)]
+                book.close()
+                return (rows[0], rows[1:]) if rows else None
+        except Exception:
+            return None
+        return None
+
+    def _standardize_all_locales(self, files, intake, out_dir: Path,
+                                 source_column: str, column_map: dict,
+                                 stem: str) -> str:
+        """Every locale from one multi-language sheet, in one call.
+
+        Output stays one file per locale because that is what the LQA
+        cascade consumes: T1 checks placeholders and width against ONE
+        target, T2 checks consistency within ONE locale, T3 reviews ONE
+        language pair. A merged file could not say which locale a finding
+        belongs to.
+
+        What this removes is the WASTE, not the format: reading the same
+        sheet four times, and re-deriving how to read it four times.
+
+        Failures are per-locale — one bad column must not cost the others,
+        and the operator needs to know exactly which one to fix.
+        """
+        from .exports import emit_bilingual_jsonl
+
+        # Read the sheet ONCE with the deterministic reader. A term sheet
+        # is a plain table with named columns, so there is nothing here
+        # that needs a generated adapter — and using one would key the
+        # cache by suffix while the script itself hardcodes a column,
+        # which is how the wrong language ends up in a reused adapter.
+        table = self._read_table(files[0]) if len(files) == 1 else None
+
+        results, failures = [], []
+        if table is not None:
+            header, rows = table
+            if source_column not in header:
+                return json.dumps({
+                    "status": "failed", "written": [],
+                    "failed": [f"source column {source_column!r} not found; "
+                               f"headers are {header}"]}, ensure_ascii=False)
+            source_index = header.index(source_column)
+            for locale, column in column_map.items():
+                if locale not in intake.target_locales:
+                    failures.append(
+                        f"{locale}: not a target locale of this job "
+                        f"({', '.join(intake.target_locales)})")
+                    continue
+                if str(column) not in header:
+                    failures.append(
+                        f"{locale}: column {column!r} not found; headers "
+                        f"are {header}")
+                    continue
+                target_index = header.index(str(column))
+                pairs = [(row[source_index], row[source_index],
+                          row[target_index], str(files[0]))
+                         for row in rows
+                         if len(row) > max(source_index, target_index)
+                         and str(row[source_index]).strip()]
+                out = out_dir / f"{stem}_{intake.source_lang}-{locale}.jsonl"
+                try:
+                    from .exports import _write_pairs
+                    empty = sum(1 for _k, _s, t, _l in pairs
+                                if not str(t).strip())
+                    written, _ = _write_pairs(
+                        pairs, out, source_lang=intake.source_lang,
+                        target_lang=locale, empty=empty, identical=0)
+                except Exception as err:
+                    failures.append(f"{locale} (column {column!r}): {err}")
+                    continue
+                results.append({"locale": locale, "column": column,
+                                "written": written,
+                                "empty_targets_included": empty,
+                                "path": str(out)})
+            return json.dumps({
+                "status": "complete" if results and not failures
+                          else ("partial" if results else "failed"),
+                "written": results, "failed": failures,
+                "next": ("Each locale has its own file — the LQA cascade "
+                         "audits ONE language pair at a time. Do not "
+                         "re-run these; report the paths and counts."
+                         if results else
+                         "Nothing was written; fix the errors above.")},
+                ensure_ascii=False)
+        for locale, column in column_map.items():
+            if locale not in intake.target_locales:
+                failures.append(
+                    f"{locale}: not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+                continue
+            out = out_dir / f"{stem}_{intake.source_lang}-{locale}.jsonl"
+            try:
+                written, empty = emit_bilingual_jsonl(
+                    files, out, source_lang=intake.source_lang,
+                    target_lang=locale,
+                    columns=[source_column, str(column)],
+                    fallback=self.job._bilingual_fallback(self.provider,
+                                                          self.dry_run))
+            except Exception as err:
+                failures.append(f"{locale} (column {column!r}): {err}")
+                continue
+            results.append({"locale": locale, "column": column,
+                            "written": written,
+                            "empty_targets_included": empty,
+                            "path": str(out)})
+        return json.dumps({
+            "status": "complete" if results and not failures
+                      else ("partial" if results else "failed"),
+            "written": results, "failed": failures,
+            "next": ("Each locale has its own file — the LQA cascade "
+                     "audits ONE language pair at a time. Do not re-run "
+                     "these; report the paths and counts."
+                     if results else
+                     "Nothing was written; fix the errors above.")},
+            ensure_ascii=False)
+
     def _t_standardize(self, args: dict) -> str:
         from .exports import emit_bilingual_jsonl, emit_flat_json
         from .ingest import ingest_any
@@ -581,6 +721,22 @@ class ChatOrchestrator:
                          "it again. Report the path and count to the "
                          "operator.")})
         if output == "bilingual_jsonl":
+            # `column_map` supplies the locales itself (one per column), so
+            # it is handled BEFORE the single-locale rules below — asking
+            # it for one `target_lang` would be asking the wrong question.
+            column_map = args.get("column_map")
+            if column_map:
+                if not isinstance(column_map, dict):
+                    return ('error: "column_map" maps locale → column '
+                            'name, e.g. {"ja": "日本語", "ko": "한국어"}')
+                source_column = str(args.get("source_column") or "")
+                if not source_column:
+                    return ('error: "column_map" needs "source_column" too '
+                            '— which column holds the source language')
+                return self._standardize_all_locales(
+                    files, intake, out_dir, source_column, column_map,
+                    str(args.get("out_name") or "glossary"))
+
             # Never guess the locale when several are configured. Falling
             # back to target_locales[0] labelled a Japanese file "zh-CN"
             # and wrote 400 rows nobody could use — a mislabelled export
@@ -616,6 +772,14 @@ class ChatOrchestrator:
             # the columns named, one sheet yields one pair set per locale.
             columns = args.get("columns") or []
             single = [f for f in files if f.suffix.lower() != ".po"]
+
+            # A multi-language sheet maps to SEVERAL locales at once.
+            # The OUTPUT must stay one source+target per file — the LQA
+            # cascade checks placeholders, consistency and semantics
+            # against ONE target, and a merged report could not say which
+            # locale a finding belongs to. But re-reading the same sheet
+            # four times to say that is pure waste, so one call can emit
+            # every locale.
             if columns and len(columns) != 2:
                 return ('error: "columns" takes exactly two names — the '
                         'source column and the target column, e.g. '
