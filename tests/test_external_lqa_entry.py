@@ -90,7 +90,7 @@ def test_a_non_po_goes_through_the_fallback(tmp_path):
     csv.write_text("Key,English,Chinese\nA,Start,开始\nB,Quit,退出\n",
                    encoding="utf-8")
 
-    def fake_adapter(paths, *, context=""):
+    def fake_adapter(paths, *, context="", **kw):
         assert isinstance(paths, list)      # the WHOLE set, not one file
         assert "en" in context and "zh-CN" in context
         return [("A", "Start", "开始", str(paths[0])),
@@ -118,7 +118,7 @@ def test_an_untranslated_row_survives_alongside_translated_ones(tmp_path):
     written, empty = emit_bilingual_jsonl(
         [csv], tmp_path / "out.jsonl", source_lang="en",
         target_lang="zh-CN",
-        fallback=lambda p, *, context="": [
+        fallback=lambda p, *, context="", **kw: [
             ("A", "Start", "开始", str(p[0])),
             ("B", "Quit", "", str(p[0]))])
     assert written == 2 and empty == 1
@@ -137,7 +137,7 @@ def test_an_export_with_NO_translations_is_refused(tmp_path):
         emit_bilingual_jsonl(
             [csv], tmp_path / "out.jsonl", source_lang="en",
             target_lang="ja",
-            fallback=lambda p, *, context="": [
+            fallback=lambda p, *, context="", **kw: [
                 (f"K{n}", "ゲーム開始", "", str(p[0])) for n in range(5)])
     message = str(excinfo.value)
     assert "empty target" in message
@@ -155,7 +155,7 @@ def test_two_files_are_handed_to_the_adapter_together(tmp_path):
 
     seen = {}
 
-    def adapter(paths, *, context=""):
+    def adapter(paths, *, context="", **kw):
         seen["files"] = [p.name for p in paths]
         seen["context"] = context
         return [("A", "Start Game", "ゲーム開始", str(paths[0]))]
@@ -182,7 +182,7 @@ def test_a_source_language_file_is_still_refused(tmp_path):
         emit_bilingual_jsonl(
             [csv], tmp_path / "out.jsonl", source_lang="en",
             target_lang="zh-CN",
-            fallback=lambda p, *, context="": [
+            fallback=lambda p, *, context="", **kw: [
                 (f"K{n}", "Start", "Start", str(p[0])) for n in range(10)])
     assert "source-language file" in str(excinfo.value)
 
@@ -328,7 +328,7 @@ def test_a_wrong_column_choice_is_caught_before_writing(tmp_path):
     out = tmp_path / "out.jsonl"
 
     # an adapter that ignored the instruction and took columns B and C
-    def wrong_columns(paths, *, context=""):
+    def wrong_columns(paths, *, context="", **kw):
         return [("Barrier", "屏障", "屏障", str(paths[0])),
                 ("Season Trial", "季节试炼", "季節試煉", str(paths[0]))]
 
@@ -346,7 +346,7 @@ def test_the_right_columns_pass_the_check(tmp_path):
 
     source = _glossary(tmp_path)
 
-    def right_columns(paths, *, context=""):
+    def right_columns(paths, *, context="", **kw):
         assert "English" in context and "日本語" in context
         return [("Barrier", "Barrier", "バリア", str(paths[0])),
                 ("Season Trial", "Season Trial", "季節の試練",
@@ -367,7 +367,7 @@ def test_a_column_name_that_does_not_exist_is_reported(tmp_path):
         emit_bilingual_jsonl(
             [source], tmp_path / "out.jsonl", source_lang="en",
             target_lang="ja", columns=["English", "Klingon"],
-            fallback=lambda p, *, context="": [
+            fallback=lambda p, *, context="", **kw: [
                 ("A", "x", "y", str(p[0]))])
     assert "Klingon" in str(excinfo.value)
 
@@ -671,3 +671,202 @@ def test_a_listing_without_subdirectories_has_no_note(tmp_path):
     result = json.loads(chat._t_list_files({"dir": "flat"}))
     assert "subdirectories" not in result
     assert result["entries"] == ["a.txt (1B)"]
+
+
+# ------------------------------- the glossary an external audit can see
+
+def _term_sheet(tmp_path: Path) -> Path:
+    pytest.importorskip("openpyxl")
+    import openpyxl
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["English", "日本語"])
+    sheet.append(["Barrier", "バリア"])
+    sheet.append(["Season Trial", "季節の試練"])
+    path = tmp_path / "terms.xlsx"
+    book.save(path)
+    return path
+
+
+def test_a_term_sheet_becomes_the_t1_shape(tmp_path):
+    """`standardize` produces bilingual PAIRS — the LQA input. The gate
+    needs the T1 {metadata, terms} termbase, and nothing bridged the two,
+    so a project could hold a perfectly good glossary and still audit with
+    zero locked terms."""
+    from orbit8.cli import main
+
+    out = tmp_path / "glossary_terms.json"
+    assert main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+                 "--source-column", "English", "--target-column", "日本語",
+                 "--locale", "ja", "--out", str(out)]) == 0
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert set(payload) == {"metadata", "terms"}
+    assert payload["terms"]["Barrier"]["translation"] == "バリア"
+    assert payload["metadata"]["locale"] == "ja"
+
+
+def test_terms_are_advisory_until_ratified(tmp_path):
+    """A client sheet is a proposal. Enforcing every row as law reports
+    correct translations as defects — and the sheet may itself be wrong
+    (one observed had a term whose Traditional column held an unrelated
+    word)."""
+    from orbit8.cli import main
+
+    out = tmp_path / "g.json"
+    main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+          "--source-column", "English", "--target-column", "日本語",
+          "--locale", "ja", "--out", str(out)])
+    assert not json.loads(out.read_text())["terms"]["Barrier"]["locked"]
+
+    locked = tmp_path / "locked.json"
+    main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+          "--source-column", "English", "--target-column", "日本語",
+          "--locale", "ja", "--lock", "--out", str(locked)])
+    assert json.loads(locked.read_text())["terms"]["Barrier"]["locked"]
+
+
+def test_a_missing_column_is_reported(tmp_path, capsys):
+    from orbit8.cli import main
+    assert main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+                 "--source-column", "English", "--target-column", "Klingon",
+                 "--locale", "ja", "--out", str(tmp_path / "g.json")]) == 2
+    assert "Klingon" in capsys.readouterr().err
+
+
+def test_an_external_audit_sees_the_promoted_termbase(tmp_path):
+    """THE fix. `_glossary` read only the job's s3 artifact, which an
+    external audit never has — it enters at S5 and never runs ASSET. So
+    the terminology check ran with no locked terms and found nothing,
+    which reads as a clean bill of health rather than a check that never
+    ran."""
+    from orbit8.cli import main
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    (project / "40-reference" / "glossary").mkdir(parents=True)
+    main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+          "--source-column", "English", "--target-column", "日本語",
+          "--locale", "ja", "--lock",
+          "--out", str(project / "40-reference" / "glossary"
+                       / "glossary_terms.json")])
+
+    job = Job.init(project / "jobs", "audit",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    glossary = job._glossary("ja")
+    assert glossary is not None
+    assert glossary.locked_map(locked_only=True)["Barrier"] == "バリア"
+
+
+def test_a_locked_term_violation_is_caught_end_to_end(tmp_path):
+    """The whole point: sheet → termbase → audit → finding."""
+    from orbit8.cli import main
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    (project / "40-reference" / "glossary").mkdir(parents=True)
+    main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+          "--source-column", "English", "--target-column", "日本語",
+          "--locale", "ja", "--lock",
+          "--out", str(project / "40-reference" / "glossary"
+                       / "glossary_terms.json")])
+
+    pairs = project / "20-work" / "pairs.jsonl"
+    pairs.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in [
+        {"key": "A", "source_language": "en", "target_language": "ja",
+         "source_text": "Use the Barrier to block it",
+         "target_text": "漁網で防いでください"},          # violates
+        {"key": "B", "source_language": "en", "target_language": "ja",
+         "source_text": "The Season Trial begins",
+         "target_text": "季節の試練が始まる"},            # correct
+    ]) + "\n", encoding="utf-8")
+
+    job = Job.init(project / "jobs", "audit",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    chat = ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+    result = json.loads(chat._t_lqa_run(
+        {"pairs": str(pairs), "locale": "ja", "name": "t",
+         "deterministic_only": True}))
+
+    assert result["checked"] == 2
+    assert result["by_bug_type"].get("terminology") == 1
+
+
+# ------------------------------- the adapter cache must know its columns
+
+def test_two_locales_do_not_share_one_cached_adapter(tmp_path):
+    """The dead end: the cache key was suffix + file count while the
+    GENERATED SCRIPT hardcodes one language's column. The adapter written
+    for 日本語 was reused for 繁體中文, returned Japanese, the column guard
+    correctly refused — and every retry hit the same cached script, so the
+    request could never succeed."""
+    from orbit8.exports import emit_bilingual_jsonl
+
+    source = _glossary(tmp_path)
+    seen = []
+
+    def adapter(paths, *, context="", cache_key="", regenerate=False):
+        seen.append(cache_key)
+        # honour whichever columns the context asked for
+        if "日本語" in context:
+            return [("Barrier", "Barrier", "バリア", str(paths[0])),
+                    ("Season Trial", "Season Trial", "季節の試練",
+                     str(paths[0]))]
+        return [("Barrier", "Barrier", "屏障", str(paths[0])),
+                ("Season Trial", "Season Trial", "季節試煉", str(paths[0]))]
+
+    emit_bilingual_jsonl([source], tmp_path / "ja.jsonl", source_lang="en",
+                         target_lang="ja", columns=["English", "日本語"],
+                         fallback=adapter)
+    emit_bilingual_jsonl([source], tmp_path / "tw.jsonl", source_lang="en",
+                         target_lang="zh-TW",
+                         columns=["English", "繁體中文"], fallback=adapter)
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1], "different columns must not share a cache key"
+
+
+def test_a_stale_bad_adapter_is_regenerated_once(tmp_path):
+    """A CACHED adapter can be wrong for these columns, and re-running it
+    can only fail identically — before this the only recovery was deleting
+    the artifact by hand."""
+    from orbit8.exports import emit_bilingual_jsonl
+
+    source = _glossary(tmp_path)
+    calls = {"n": 0}
+
+    def flaky(paths, *, context="", cache_key="", regenerate=False):
+        calls["n"] += 1
+        if not regenerate:                       # the stale cached script
+            return [("Barrier", "屏障", "屏障", str(paths[0]))]
+        return [("Barrier", "Barrier", "バリア", str(paths[0])),
+                ("Season Trial", "Season Trial", "季節の試練",
+                 str(paths[0]))]
+
+    written, _empty = emit_bilingual_jsonl(
+        [source], tmp_path / "out.jsonl", source_lang="en",
+        target_lang="ja", columns=["English", "日本語"], fallback=flaky)
+    assert written == 2
+    assert calls["n"] == 2                       # once stale, once fresh
+
+
+def test_a_second_failure_still_propagates(tmp_path):
+    """Regenerating buys ONE retry. A genuinely unsatisfiable request must
+    still surface rather than loop."""
+    from orbit8.exports import emit_bilingual_jsonl
+
+    source = _glossary(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        emit_bilingual_jsonl(
+            [source], tmp_path / "out.jsonl", source_lang="en",
+            target_lang="ja", columns=["English", "日本語"],
+            fallback=lambda p, *, context="", cache_key="",
+            regenerate=False: [("Barrier", "屏障", "屏障", str(p[0]))])
+    assert "did not use the requested columns" in str(excinfo.value)

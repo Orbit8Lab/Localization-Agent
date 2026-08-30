@@ -272,6 +272,23 @@ class Job:
             # T1 — better than no glossary for pre-lock audits; G1 approval
             # replaces this with the frozen artifact.
             t1 = json.loads(staged.read_text(encoding="utf-8"))
+        else:
+            # Last fallback: the PROJECT's promoted termbase
+            # (40-reference/glossary/). An EXTERNAL audit enters at S5 and
+            # never runs ASSET, so it has no s3 artifact — and without
+            # this it ran with zero locked terms, silently finding no
+            # terminology defects at all. That is the check a
+            # glossary-driven client cares about most, so finding nothing
+            # looks like a clean bill of health rather than a check that
+            # never ran.
+            from .project_paths import resolve_glossary
+            promoted, _notes = resolve_glossary(
+                start=self.store.root.resolve().parent)
+            if promoted is not None and promoted.exists():
+                payload = json.loads(promoted.read_text(encoding="utf-8"))
+                # Accept both the envelope and the bare T1 shape: a
+                # promoted file is written bare, an artifact is wrapped.
+                t1 = payload.get("payload", payload)
         t2 = {}
         for genre in intake.genre:
             t2.update(self._tenant().genre_glossary(genre, locale))
@@ -325,7 +342,8 @@ class Job:
         from .codegen import (AdapterRecord, generate_bilingual_adapter,
                               run_adapter, validate_pairs)
 
-        def fallback(paths, *, context: str = ""):
+        def fallback(paths, *, context: str = "", cache_key: str = "",
+                     regenerate: bool = False):
             """`paths` is the WHOLE file set for one locale, not one file.
 
             Passing files one at a time is what produced unusable output:
@@ -342,8 +360,19 @@ class Job:
             # reusing either for the other would silently misread a drop.
             tag = "-".join(sorted({p.suffix.replace('.', '_')
                                    for p in files}))
-            name = f"bilingual_adapter{tag}_x{len(files)}"
-            if self.store.exists(1, name):
+            # `cache_key` carries the COLUMNS. Without it the key was
+            # suffix + file count while the generated script hardcodes one
+            # language's column — so the adapter written for 日本語 was
+            # reused for 繁體中文, returned Japanese, the column guard
+            # refused, and every retry hit the same cached script. An
+            # unrecoverable dead end that looked like a model failure.
+            suffix_tag = f"_{cache_key}" if cache_key else ""
+            name = (f"bilingual_adapter{tag}_x{len(files)}{suffix_tag}")
+            # `regenerate` discards a stored adapter that produced wrong
+            # output: re-running it could only fail the same way, and
+            # before this the caller had no way to recover from a bad
+            # cached script except deleting the artifact by hand.
+            if self.store.exists(1, name) and not regenerate:
                 stored = self.store.read(1, name, AdapterRecord)
                 return run_adapter(stored.script, files,
                                    validate=validate_pairs)

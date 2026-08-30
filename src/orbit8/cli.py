@@ -790,6 +790,86 @@ def _cmd_glossary_check(args) -> int:
     return 1 if report.blocked else 0
 
 
+def _cmd_glossary_from_sheet(args) -> int:
+    """A client's term sheet → the T1 termbase the gate actually reads.
+
+    `standardize` produces bilingual PAIRS, which is the LQA input shape;
+    the deterministic gate needs the T1 `{metadata, terms}` termbase, and
+    nothing bridged the two. So a project could have a perfectly good
+    glossary sitting in 40-reference/ and still run its LQA with ZERO
+    locked terms — the terminology check silently finding nothing, which
+    is the check a glossary-driven client cares about most.
+
+    Terms are written LOCKED only when `--lock` is given. A client sheet
+    is a proposal until someone ratifies it: enforcing every row as law
+    reports correct translations as defects, and the sheet may itself
+    carry errors (an observed one had a term whose Traditional Chinese
+    column held an unrelated word).
+    """
+    from datetime import date
+
+    from .glossary_import import emit_rag_json
+    from .orchestrator import ChatOrchestrator
+
+    sheet = Path(args.sheet)
+    if not sheet.exists():
+        print(f"no such file: {sheet}", file=sys.stderr)
+        return 2
+    table = ChatOrchestrator._read_table(sheet)
+    if table is None:
+        print(f"could not read {sheet.name} as a spreadsheet "
+              f"(need .xlsx/.xlsm/.csv/.tsv)", file=sys.stderr)
+        return 2
+    header, rows = table
+    for column in (args.source_column, args.target_column):
+        if column not in header:
+            print(f"column {column!r} not found; headers are {header}",
+                  file=sys.stderr)
+            return 2
+    source_index = header.index(args.source_column)
+    target_index = header.index(args.target_column)
+
+    terms, skipped = {}, 0
+    for row in rows:
+        if len(row) <= max(source_index, target_index):
+            skipped += 1
+            continue
+        term = str(row[source_index]).strip()
+        rendering = str(row[target_index]).strip()
+        if not term or not rendering:
+            skipped += 1
+            continue
+        terms[term] = {
+            "translation": rendering,
+            "type": "other",
+            "tier": 1,
+            # Locked = law. Off by default: a client sheet is a proposal
+            # until a human ratifies it, and mined-but-unratified entries
+            # enforced as law turn correct strings into reported defects.
+            "locked": bool(args.lock),
+            "source": f"client term sheet {sheet.name} "
+                      f"({date.today().isoformat()})",
+        }
+    if not terms:
+        print(f"no usable rows in {sheet.name}", file=sys.stderr)
+        return 2
+
+    out = Path(args.out) if args.out else (
+        sheet.parent / f"glossary_terms.{args.locale}.json")
+    emit_rag_json(terms, out, game=args.game, locale=args.locale,
+                  source_lang=args.source_lang)
+    print(f"{len(terms)} term(s) → {out}")
+    if skipped:
+        print(f"  {skipped} row(s) skipped (missing term or rendering)")
+    print(f"  locked: {bool(args.lock)}"
+          + ("" if args.lock else
+             "  — terms are ADVISORY until ratified; re-run with --lock, "
+             "or lock individual rulings with `orbit8 glossary add`"))
+    print(f"\nMake it the project's active termbase:\n"
+          f"  uv run orbit8 glossary promote {out}")
+    return 0
+
+
 def _cmd_glossary_promote(args) -> int:
     """Publish a run's glossary as the project's active termbase
     (40-reference/glossary/) so every later stage resolves the same
@@ -1932,6 +2012,30 @@ def main(argv=None) -> int:
                       help="default: the project's active termbase")
     gvar.add_argument("--origin")
     gvar.set_defaults(func=_cmd_glossary_variants)
+
+    gsheet = gsub.add_parser(
+        "from-sheet",
+        help="client term sheet (xlsx/csv) → T1 termbase the gate reads "
+             "— the shape `standardize` does NOT produce")
+    gsheet.add_argument("sheet", help="the term sheet")
+    gsheet.add_argument("--source-column", required=True,
+                        help='header of the source column, e.g. "English"')
+    gsheet.add_argument("--target-column", required=True,
+                        help='header of the target column, e.g. "日本語"')
+    gsheet.add_argument("--locale", required=True,
+                        help="target locale for these renderings (ja, ko, "
+                             "zh-CN, zh-TW)")
+    gsheet.add_argument("--source-lang", default="en")
+    gsheet.add_argument("--game", default="")
+    gsheet.add_argument("--out", help="output path (default: beside the "
+                                      "sheet)")
+    gsheet.add_argument("--lock", action="store_true",
+                        help="mark every term LOCKED (law for the gate). "
+                             "Off by default: a client sheet is a proposal "
+                             "until ratified, and unratified terms "
+                             "enforced as law report correct strings as "
+                             "defects")
+    gsheet.set_defaults(func=_cmd_glossary_from_sheet)
 
     gpro = gsub.add_parser(
         "promote", help="publish a run's glossary as the project's "

@@ -126,9 +126,26 @@ def emit_bilingual_jsonl(files: List[Path], path: Path, *,
                 f"{columns[1]!r} as the target; ignore all other language "
                 f"columns. There is no id column in a term list — derive "
                 f"a stable key from the source term itself.")
-        pairs = list(fallback(non_po, context=context))
+        # Hashed, not the raw names: a column may be 繁體中文 or contain a
+        # slash, and this becomes an artifact FILENAME.
+        cache_key = ""
         if columns:
-            _check_columns_were_honoured(non_po[0], columns, pairs)
+            import hashlib
+            cache_key = hashlib.sha256(
+                "\x1f".join(str(c) for c in columns).encode("utf-8")
+            ).hexdigest()[:8]
+        pairs = list(fallback(non_po, context=context, cache_key=cache_key))
+        if columns:
+            try:
+                _check_columns_were_honoured(non_po[0], columns, pairs)
+            except ValueError:
+                # A CACHED adapter can be wrong for these columns, and
+                # re-running it can only fail identically. Discard it and
+                # generate once more; a second failure is real and
+                # propagates.
+                pairs = list(fallback(non_po, context=context,
+                                      cache_key=cache_key, regenerate=True))
+                _check_columns_were_honoured(non_po[0], columns, pairs)
         empty = sum(1 for _k, _s, target, _l in pairs if not target.strip())
         identical = sum(1 for _k, source, target, _l in pairs
                         if target.strip() and source.strip() == target.strip())
