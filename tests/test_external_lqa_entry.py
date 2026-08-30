@@ -134,6 +134,67 @@ def test_a_source_language_file_is_still_refused(tmp_path):
     assert "source-language file" in str(excinfo.value)
 
 
+# ------------------------------------------- inspecting a spreadsheet
+
+def _chat(tmp_path):
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+    job = Job.init(tmp_path / "proj" / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    return ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+
+
+def test_inspecting_an_xlsx_shows_columns_not_zip_bytes(tmp_path):
+    """An xlsx is a zip. Text-peeking it handed the model `PK\\x03\\x04…`,
+    which answers nothing about the columns — so it called inspect again
+    and again and burned the whole step budget on a tool that "succeeded"
+    every time."""
+    openpyxl = pytest.importorskip("openpyxl")
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Strings"
+    sheet.append(["Key", "English", "Japanese"])
+    sheet.append(["UI_START", "Start Game", "ゲーム開始"])
+    path = tmp_path / "proj" / "10-received"
+    path.mkdir(parents=True)
+    book.save(path / "Bilingual.xlsx")
+
+    result = json.loads(_chat(tmp_path)._t_inspect_file(
+        {"path": "10-received/Bilingual.xlsx"}))
+    assert "PK" not in str(result.get("head", ""))
+    preview = result["sheet_preview"][0]
+    assert preview["header"] == ["Key", "English", "Japanese"]
+    assert preview["sample_rows"][0][2] == "ゲーム開始"
+
+
+def test_inspecting_a_csv_shows_its_header(tmp_path):
+    path = tmp_path / "proj" / "10-received"
+    path.mkdir(parents=True)
+    (path / "pairs.csv").write_text(
+        "Key,English,Japanese\nUI_START,Start Game,ゲーム開始\n",
+        encoding="utf-8")
+
+    result = json.loads(_chat(tmp_path)._t_inspect_file(
+        {"path": "10-received/pairs.csv"}))
+    assert result["header"] == ["Key", "English", "Japanese"]
+
+
+def test_an_unreadable_spreadsheet_reports_the_error(tmp_path):
+    """Never fall back to a byte peek: binary noise is what caused the
+    loop this exists to prevent."""
+    path = tmp_path / "proj" / "10-received"
+    path.mkdir(parents=True)
+    (path / "broken.xlsx").write_bytes(b"not really a spreadsheet")
+
+    result = json.loads(_chat(tmp_path)._t_inspect_file(
+        {"path": "10-received/broken.xlsx"}))
+    assert "error" in result
+    assert "head" not in result
+
+
 # ---------------------------------------------- the bilingual contract
 
 def test_the_pair_validator_requires_all_three_fields():

@@ -38,7 +38,13 @@ from .schemas import IntakeBrief, Strict
 from .skill_docs import SkillLibrary
 from .tenancy import TenantError, resolve_read, resolve_write
 
-MAX_STEPS_PER_TURN = 14
+# Tool calls one turn may make. 20 covers a legitimate multi-file session
+# — list a drop, inspect five spreadsheets, standardize four locales,
+# verify each — with headroom. Deliberately not much higher: both loops
+# seen in practice made ZERO progress, so a bigger budget would have
+# bought more wasted calls and a longer wait, not a better answer. The
+# repeat-call breaker below is what actually stops those.
+MAX_STEPS_PER_TURN = 20
 
 # How many times one tool may fail IDENTICALLY (same tool, same args, same
 # error) before the turn stops. Two, not one: a first retry is sometimes
@@ -61,6 +67,24 @@ REPEAT_FAILURE_LIMIT = 2
 # assembled result is the signal if it is ever set too high.
 CONTEXT_BUDGET_TOKENS = 100_000
 REPLY_RESERVE_TOKENS = 2_000      # headroom for the model's own answer
+
+
+def max_steps_per_turn() -> int:
+    """Step cap, overridable via ``$ORBIT8_MAX_STEPS``.
+
+    Tunable per box for the same reason as the context budget: what counts
+    as "a long turn" depends on how many locales and files a project has,
+    and that should not require editing source.
+    """
+    import os
+    raw = os.environ.get("ORBIT8_MAX_STEPS")
+    if not raw:
+        return MAX_STEPS_PER_TURN
+    try:
+        value = int(raw)
+    except ValueError:
+        return MAX_STEPS_PER_TURN
+    return value if value > 0 else MAX_STEPS_PER_TURN
 
 
 def context_budget() -> int:
@@ -406,11 +430,70 @@ class ChatOrchestrator:
                    if p.name not in (".DS_Store",)]
         return json.dumps(entries[:60], ensure_ascii=False)
 
+    @staticmethod
+    def _tabular_preview(path: Path, suffix: str) -> Dict[str, object]:
+        """Sheets, headers and a few rows — what a spreadsheet actually is.
+
+        The question an operator asks of a localization spreadsheet is
+        always "which column is the source and which is the target", so
+        that is what this answers. Column letters are included because the
+        adapter-writer prompt refers to them.
+        """
+        preview: Dict[str, object] = {"format": suffix.lstrip(".")}
+        try:
+            if suffix in (".csv", ".tsv"):
+                import csv as _csv
+                delimiter = "\t" if suffix == ".tsv" else ","
+                with path.open("r", encoding="utf-8-sig",
+                               errors="replace", newline="") as handle:
+                    rows = []
+                    for index, row in enumerate(_csv.reader(
+                            handle, delimiter=delimiter)):
+                        if index > 5:
+                            break
+                        rows.append([cell[:60] for cell in row])
+                preview.update(header=rows[0] if rows else [],
+                               sample_rows=rows[1:])
+                return preview
+
+            from openpyxl import load_workbook
+            # read_only + values_only: a localization export can be tens of
+            # MB, and nothing here needs formatting or formulas.
+            book = load_workbook(path, read_only=True, data_only=True)
+            preview["sheets"] = book.sheetnames
+            sheets = []
+            for name in book.sheetnames[:3]:
+                sheet = book[name]
+                rows = []
+                for index, row in enumerate(
+                        sheet.iter_rows(max_row=6, values_only=True)):
+                    rows.append(["" if cell is None else str(cell)[:60]
+                                 for cell in row])
+                    if index >= 5:
+                        break
+                sheets.append({
+                    "sheet": name,
+                    "rows_total": sheet.max_row,
+                    "columns": [chr(65 + n) if n < 26 else f"col{n}"
+                                for n in range(len(rows[0]))] if rows else [],
+                    "header": rows[0] if rows else [],
+                    "sample_rows": rows[1:],
+                })
+            book.close()
+            preview["sheet_preview"] = sheets
+        except Exception as err:
+            # Report the failure rather than falling back to a byte peek:
+            # binary noise is what caused the loop this method exists to
+            # prevent.
+            preview["error"] = f"could not read as a spreadsheet: {err}"
+        return preview
+
     def _t_inspect_file(self, args: dict) -> str:
         path = self._confine_read(str(args.get("path", "")))
         raw = path.read_bytes()
         info: Dict[str, object] = {"file": path.name, "bytes": len(raw)}
-        if path.suffix.lower() == ".po":
+        suffix = path.suffix.lower()
+        if suffix == ".po":
             from .exports import read_po_entries
             entries = read_po_entries(path)
             filled = sum(1 for _, _, t, _ in entries if t.strip())
@@ -418,6 +501,13 @@ class ChatOrchestrator:
                         sample=[{"key": k[:16], "msgid": s[:60],
                                  "msgstr": t[:60]}
                                 for k, s, t, _ in entries[:3]])
+        elif suffix in (".xlsx", ".xlsm", ".csv", ".tsv"):
+            # A spreadsheet is not text. Falling through to the byte peek
+            # handed the model `PK\x03\x04…` (an xlsx is a zip), which
+            # answers nothing about the columns — so it called inspect
+            # again, and again, and burned the whole step budget on a tool
+            # that "succeeded" every time.
+            info.update(self._tabular_preview(path, suffix))
         else:
             # Text peek. The old flat 800-byte cap silently hid the tail of
             # every generated report (a compare .md is ~5KB, its .json
@@ -869,6 +959,37 @@ class ChatOrchestrator:
         except OSError:
             pass                    # tracing must never break a session
 
+    @staticmethod
+    def _step_limit_reply(evidence: List[str]) -> str:
+        """What was accomplished, and how to pick it up.
+
+        The old message ("I hit the per-turn step limit... state is
+        unchanged") was honest and useless: it named neither what the turn
+        learned nor what to type next, so the operator restarted work the
+        agent had already done. An unfinished turn should be RESUMABLE.
+        """
+        lines = ["I reached the per-turn step limit before finishing."]
+        if evidence:
+            lines.append("\nWhat I did:")
+            for item in evidence:
+                # Each entry reads "[tool] name({args}) -> observation".
+                head = item[len("[tool] "):] if item.startswith("[tool] ") \
+                    else item
+                call, _, result = head.partition(" -> ")
+                outcome = result.strip().replace("\n", " ")
+                if outcome.startswith("error:"):
+                    summary = outcome[:100]
+                else:
+                    summary = f"ok ({len(outcome)} chars)" if len(
+                        outcome) > 120 else outcome[:120]
+                lines.append(f"  {call[:90]} → {summary}")
+        lines.append(
+            "\nThe job state is unchanged beyond those steps. Say "
+            '"continue" to resume, or narrow the request — asking for one '
+            "file or one locale at a time keeps a turn well inside the "
+            "limit.")
+        return "\n".join(lines)
+
     def _retire_evidence(self, evidence: List[str]) -> None:
         """Move this turn's tool results down into history.
 
@@ -895,7 +1016,7 @@ class ChatOrchestrator:
         evidence: List[str] = []
         # (tool, args, error) -> how many times it has failed identically.
         repeats: Dict[tuple, int] = {}
-        for _ in range(MAX_STEPS_PER_TURN):
+        for _ in range(max_steps_per_turn()):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
             call = complete_json(self.provider, SYSTEM,
@@ -954,29 +1075,35 @@ class ChatOrchestrator:
             # `failed`) and by RETURNING an "error: …" string, which most
             # of them do. Counting only exceptions would leave the second
             # kind looping exactly as before.
+            # Counting only FAILURES missed the worse loop: a tool that
+            # succeeds identically every time. Twelve `list_files` calls
+            # with the same args each returned valid JSON, so nothing
+            # tripped — and the turn died at the step limit with a generic
+            # message. Same call, same result, no new information, whether
+            # or not it "worked".
             outcome = failed or (observation
                                  if observation.startswith("error:")
                                  else None)
-            if outcome is not None:
-                signature = (call.tool,
-                             json.dumps(call.args, sort_keys=True,
-                                        default=str), outcome)
-                repeats[signature] = repeats.get(signature, 0) + 1
-                if repeats[signature] >= REPEAT_FAILURE_LIMIT:
-                    reply = (
-                        f"Stopping: `{call.tool}` failed the same way "
-                        f"{repeats[signature]} times and retrying cannot "
-                        f"change that.\n\n{observation}")
-                    self._retire_evidence(evidence)
-                    self.history.append(("operator", user_msg))
-                    self.history.append(("orbit8", reply))
-                    self._trace("abort", reason="repeated_failure",
-                                tool=call.tool, error=outcome)
-                    return reply
+            signature = (call.tool,
+                         json.dumps(call.args, sort_keys=True, default=str),
+                         outcome if outcome is not None else observation)
+            repeats[signature] = repeats.get(signature, 0) + 1
+            if repeats[signature] >= REPEAT_FAILURE_LIMIT:
+                verb = ("failed the same way" if outcome is not None
+                        else "returned the same result")
+                reply = (
+                    f"Stopping: `{call.tool}` {verb} "
+                    f"{repeats[signature]} times and repeating it "
+                    f"cannot change that.\n\n{observation}")
+                self._retire_evidence(evidence)
+                self.history.append(("operator", user_msg))
+                self.history.append(("orbit8", reply))
+                self._trace("abort", reason="repeated_call",
+                            tool=call.tool, error=outcome)
+                return reply
+        reply = self._step_limit_reply(evidence)
         self._retire_evidence(evidence)
         self.history.append(("operator", user_msg))
-        reply = ("I hit the per-turn step limit before finishing — the job "
-                 "state is unchanged beyond the steps shown above. Ask me "
-                 "to continue if you want more.")
         self.history.append(("orbit8", reply))
+        self._trace("abort", reason="step_limit", steps=len(evidence))
         return reply

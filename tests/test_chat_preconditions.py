@@ -263,7 +263,7 @@ def test_the_abort_is_traced(chat, monkeypatch):
     _always_calls(monkeypatch, "read_artifact", {"stage": 0, "name": "no"})
     chat.turn("read it")
     assert any(record.get("event") == "abort"
-               and record.get("reason") == "repeated_failure"
+               and record.get("reason") == "repeated_call"
                for record in chat.trace)
 
 
