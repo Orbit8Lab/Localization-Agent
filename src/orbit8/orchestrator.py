@@ -151,12 +151,22 @@ directory inside the project folder
 <next_offset> to read on. NEVER describe content you have not actually \
 read in a window; page to it first.
 - {"tool": "standardize", "args": {"files": ["<file>", …], "output": \
-"source_json" | "bilingual_jsonl", "out_name": "<name>"}} — convert \
-received files into a pipeline format. source_json: flat {key: source \
-text} translation input, any supported/adapted format. bilingual_jsonl: \
-LQA/MT input paired from target-language .po files (msgid=source, \
-msgstr=target) — inspect first to confirm msgstr is actually filled. \
-Writes under the job's exports/ dir.
+"source_json" | "bilingual_jsonl", "out_name": "<name>", "target_lang": \
+"<locale>", "columns": ["<source col>", "<target col>"], "out_dir": \
+"<dir>"}} — convert received files into a pipeline format. source_json: \
+flat {key: source text} translation input. bilingual_jsonl: LQA/MT input \
+of source+target pairs. ALWAYS inspect_file first; the layout decides the \
+call:
+  · one file holding BOTH languages in columns → pass that one file;
+  · SEPARATE files per language (e.g. "Game (Source).xlsx" + \
+"Game_ja.xlsx") → pass BOTH, source first — one file alone cannot be \
+paired with itself;
+  · one sheet with SEVERAL target languages (a term list: English / 简体\
+中文 / 日本語 …) → add "columns": ["English", "简体中文"] to pick the two \
+to pair, and repeat per locale.
+  "target_lang" is REQUIRED when the job has more than one target locale. \
+"out_dir" writes elsewhere than the job's exports/ (e.g. \
+"40-reference/glossary" for terminology); it must stay inside the project.
 - {"tool": "analyze", "args": {"files": ["<file>", …], "classify": \
 false}} — corpus text analysis: total/unique strings, word counts (CJK \
 chars count as words), placeholders, and the domain breakdown with \
@@ -543,7 +553,17 @@ class ChatOrchestrator:
         if not files:
             return "error: no files given"
         intake = self.job.store.read(0, "intake", IntakeBrief)
-        out_dir = self.job.store.job_dir / "exports"
+        # Where the output lands is a real decision, not a constant. A
+        # glossary belongs in the PROJECT's 40-reference/glossary/, where
+        # every later stage resolves it (project_paths.py); a job's
+        # exports/ is the right home only for job-scoped conversions.
+        # Hardcoding it forced the agent to say "the tool will not let me
+        # put this where you asked" — accurate, and a missing capability.
+        # `_confine` (write path) keeps it inside this project.
+        if args.get("out_dir"):
+            out_dir = self._confine(str(args["out_dir"]))
+        else:
+            out_dir = self.job.store.job_dir / "exports"
         if output == "source_json":
             name = str(args.get("out_name") or "strings")
             if not name.endswith(".json"):
@@ -555,7 +575,11 @@ class ChatOrchestrator:
             for file in files:
                 records.extend(ingest_any(file, fallback=fallback))
             count = emit_flat_json(records, out)
-            return json.dumps({"written": count, "path": str(out)})
+            return json.dumps({
+                "status": "complete", "written": count, "path": str(out),
+                "next": ("This file is DONE — do not call standardize for "
+                         "it again. Report the path and count to the "
+                         "operator.")})
         if output == "bilingual_jsonl":
             # Never guess the locale when several are configured. Falling
             # back to target_locales[0] labelled a Japanese file "zh-CN"
@@ -578,14 +602,55 @@ class ChatOrchestrator:
             if not name.endswith(".jsonl"):
                 name += ".jsonl"
             out = out_dir / name
+            # Cheap structural check BEFORE any model call. A single
+            # non-.po file cannot yield pairs unless it holds both
+            # languages in columns — and when it does not, the adapter
+            # writer spends three attempts discovering that a file cannot
+            # be paired with itself (~190s observed). A .po is exempt: it
+            # carries msgid AND msgstr, so one file is genuinely enough.
+            # `columns` names which two columns to pair when one sheet
+            # holds several languages — a term sheet
+            # (English/简体中文/繁體中文/한국어/日本語) is one row per
+            # concept with FOUR target columns, so "source + target file"
+            # does not describe it and neither pipeline format fits. With
+            # the columns named, one sheet yields one pair set per locale.
+            columns = args.get("columns") or []
+            single = [f for f in files if f.suffix.lower() != ".po"]
+            if columns and len(columns) != 2:
+                return ('error: "columns" takes exactly two names — the '
+                        'source column and the target column, e.g. '
+                        '["English", "简体中文"]')
+            if len(files) == 1 and single and not columns:
+                preview = self._tabular_preview(files[0],
+                                                files[0].suffix.lower())
+                header = (preview.get("header")
+                          or (preview.get("sheet_preview") or [{}])[0]
+                          .get("header") or [])
+                if len(header) < 3:
+                    return (
+                        f"error: {files[0].name!r} has {len(header)} "
+                        f"column(s) — too few to hold both a source and a "
+                        f"{locale} translation. If the source text is in a "
+                        f"separate file, pass BOTH (source first, then the "
+                        f"{locale} file) so they can be paired on key.")
             written, empty = emit_bilingual_jsonl(
                 files, out, source_lang=intake.source_lang,
-                target_lang=locale,
+                target_lang=locale, columns=list(columns) or None,
                 fallback=self.job._bilingual_fallback(self.provider,
                                                       self.dry_run))
-            return json.dumps({"written": written,
-                               "empty_targets_included": empty,
-                               "path": str(out)})
+            # `status: complete` and the explicit instruction are not
+            # decoration: a bare {"written": 1395, "path": …} reads as
+            # ambiguous, and the model re-issued the identical call three
+            # times before the loop breaker stopped it — repeating work
+            # that had already succeeded on the first try.
+            return json.dumps({
+                "status": "complete",
+                "written": written,
+                "empty_targets_included": empty,
+                "path": str(out),
+                "next": (f"This file is DONE — do not call standardize for "
+                         f"{locale} again. Report the path and counts to "
+                         f"the operator, or move on to another locale.")})
         return (f"error: unknown output {output!r}; use source_json or "
                 f"bilingual_jsonl")
 

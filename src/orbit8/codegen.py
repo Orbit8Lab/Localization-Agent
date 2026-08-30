@@ -26,6 +26,18 @@ MAX_ATTEMPTS = 3
 SAMPLE_BYTES = 4096
 
 
+class UnsatisfiableInput(ValueError):
+    """The INPUT cannot produce valid output, however the adapter is written.
+
+    Distinct from an ordinary validation failure, which means the generated
+    code was wrong and a retry may fix it. Retrying an unsatisfiable input
+    just spends model calls to fail identically — the observed case took
+    ~190 seconds and four calls trying to pair a single-language file with
+    itself. Raised from a validator, this ends the loop after one attempt
+    and reports what the operator must change.
+    """
+
+
 class AdapterRecord(Strict):
     """The auditable artifact: which code ingested this format."""
     suffix: str
@@ -57,10 +69,14 @@ def _strip_fences(code: str) -> str:
     return re.sub(r"^```(?:python)?\s*|\s*```$", "", code.strip(), flags=re.M)
 
 
-def _sample_of(path: Path, raw: bytes) -> str:
+def _sample_of(raw: bytes) -> str:
     """Text files: raw head. Zip containers (docx/xlsx): member listing plus
     heads of the content-bearing XML parts, so the agent sees the actual
-    structure instead of compressed bytes."""
+    structure instead of compressed bytes.
+
+    Dispatches on the BYTES, not the filename — a mislabelled .xlsx is
+    still a zip, and the extension was never consulted.
+    """
     if not raw.startswith(b"PK\x03\x04"):
         return raw[:SAMPLE_BYTES].decode("utf-8", "replace")
     import io
@@ -176,14 +192,14 @@ def generate_converter(provider: Provider, path, *,
     primary = paths[0]
     raw = primary.read_bytes()
     if len(paths) == 1:
-        sample = _sample_of(primary, raw)
+        sample = _sample_of(raw)
     else:
         # Every file gets a sample, labelled with its real name and its
         # argv position — the name is usually what identifies the locale
         # ("Game_ja.xlsx"), and the position is how the script reaches it.
         sample = "\n\n".join(
             f"=== argv[{index + 1}] — {each.name} ===\n"
-            + _sample_of(each, each.read_bytes())
+            + _sample_of(each.read_bytes())
             for index, each in enumerate(paths))
     script: Optional[str] = None
     error: Optional[str] = None
@@ -200,6 +216,11 @@ def generate_converter(provider: Provider, path, *,
             continue
         try:
             records = validate(result.stdout, str(primary))
+        except UnsatisfiableInput:
+            # Not a code defect — no rewrite of the adapter can fix the
+            # input it was given, so stop rather than pay for two more
+            # identical failures.
+            raise
         except ValueError as err:
             error = f"output validation failed: {err}"
             continue
@@ -304,6 +325,17 @@ def validate_pairs(stdout: str, file_ref: str) -> List[tuple]:
                           file_ref))
     if not pairs:
         raise ValueError("no rows with source text")
+    if not any(key_source_target[2].strip() for key_source_target in pairs):
+        # Every target empty is a fact about the INPUT, not a defect in the
+        # generated code — so it must not be retried. Raising it as an
+        # UnsatisfiableInput stops the loop after ONE attempt instead of
+        # three: the observed case burned ~190s and four LLM calls trying
+        # to pair a single-language file with itself, which no adapter can
+        # do however it is written.
+        raise UnsatisfiableInput(
+            f"all {len(pairs)} rows have an empty target — the file(s) "
+            f"given hold ONE language. Pass BOTH the source export and "
+            f"the target export so they can be paired on key.")
     return pairs
 
 

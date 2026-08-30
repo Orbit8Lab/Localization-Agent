@@ -248,6 +248,167 @@ def test_an_unreadable_spreadsheet_reports_the_error(tmp_path):
     assert "head" not in result
 
 
+def test_a_two_column_file_is_refused_before_any_model_call(tmp_path):
+    """The structural check that turned 190 seconds into one. A single
+    non-.po file with too few columns cannot hold a source AND a target,
+    so the adapter-writer would spend three attempts discovering that a
+    file cannot be paired with itself."""
+    pytest.importorskip("openpyxl")
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["Key", "Japanese"])
+    sheet.append(["A", "ゲーム開始"])
+    received = tmp_path / "proj" / "10-received"
+    received.mkdir(parents=True)
+    book.save(received / "ja_only.xlsx")
+
+    chat = _chat(tmp_path)
+    result = chat._t_standardize({"files": ["10-received/ja_only.xlsx"],
+                                  "output": "bilingual_jsonl",
+                                  "target_lang": "ja"})
+    assert "too few to hold both" in result
+    assert "pass BOTH" in result
+
+
+def test_a_three_column_file_is_not_pre_refused(tmp_path):
+    """The check must not block a genuine bilingual sheet — it is a
+    structural impossibility test, not a quality one."""
+    pytest.importorskip("openpyxl")
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["Key", "English", "Japanese"])
+    sheet.append(["A", "Start", "開始"])
+    received = tmp_path / "proj" / "10-received"
+    received.mkdir(parents=True)
+    book.save(received / "both.xlsx")
+
+    # dry_run stops at the adapter-writer, which is PAST the column check:
+    # reaching that error proves the structural test let this file through.
+    with pytest.raises(ValueError) as excinfo:
+        _chat(tmp_path)._t_standardize({"files": ["10-received/both.xlsx"],
+                                        "output": "bilingual_jsonl",
+                                        "target_lang": "ja"})
+    assert "dry-run cannot generate an adapter" in str(excinfo.value)
+
+
+# -------------------------------------- multi-language glossary sheets
+
+def _glossary(tmp_path: Path) -> Path:
+    """A five-language term sheet — neither pipeline format fits it."""
+    pytest.importorskip("openpyxl")
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["English", "简体中文", "繁體中文", "한국어", "日本語"])
+    sheet.append(["Barrier", "屏障", "屏障", "방벽", "バリア"])
+    sheet.append(["Season Trial", "季节试炼", "季節試煉", "계절 시련",
+                  "季節の試練"])
+    received = tmp_path / "proj" / "10-received"
+    received.mkdir(parents=True, exist_ok=True)
+    path = received / "Glossary.xlsx"
+    book.save(path)
+    return path
+
+
+def test_a_wrong_column_choice_is_caught_before_writing(tmp_path):
+    """The dangerous failure: asked for English + 日本語, a generated
+    adapter fell through to "first three columns" and produced
+    简体中文 + 繁體中文. Every schema check passed — right row count,
+    right keys, non-empty texts — so only comparing against the sheet
+    reveals it. A wrong glossary is worse than none: it becomes the
+    standard every later string is judged against."""
+    from orbit8.exports import emit_bilingual_jsonl
+
+    source = _glossary(tmp_path)
+    out = tmp_path / "out.jsonl"
+
+    # an adapter that ignored the instruction and took columns B and C
+    def wrong_columns(paths, *, context=""):
+        return [("Barrier", "屏障", "屏障", str(paths[0])),
+                ("Season Trial", "季节试炼", "季節試煉", str(paths[0]))]
+
+    with pytest.raises(ValueError) as excinfo:
+        emit_bilingual_jsonl([source], out, source_lang="en",
+                             target_lang="ja",
+                             columns=["English", "日本語"],
+                             fallback=wrong_columns)
+    assert "did not use the requested columns" in str(excinfo.value)
+    assert not out.exists()          # nothing written
+
+
+def test_the_right_columns_pass_the_check(tmp_path):
+    from orbit8.exports import emit_bilingual_jsonl
+
+    source = _glossary(tmp_path)
+
+    def right_columns(paths, *, context=""):
+        assert "English" in context and "日本語" in context
+        return [("Barrier", "Barrier", "バリア", str(paths[0])),
+                ("Season Trial", "Season Trial", "季節の試練",
+                 str(paths[0]))]
+
+    written, _empty = emit_bilingual_jsonl(
+        [source], tmp_path / "out.jsonl", source_lang="en",
+        target_lang="ja", columns=["English", "日本語"],
+        fallback=right_columns)
+    assert written == 2
+
+
+def test_a_column_name_that_does_not_exist_is_reported(tmp_path):
+    from orbit8.exports import emit_bilingual_jsonl
+
+    source = _glossary(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        emit_bilingual_jsonl(
+            [source], tmp_path / "out.jsonl", source_lang="en",
+            target_lang="ja", columns=["English", "Klingon"],
+            fallback=lambda p, *, context="": [
+                ("A", "x", "y", str(p[0]))])
+    assert "Klingon" in str(excinfo.value)
+
+
+def test_standardize_requires_exactly_two_columns(tmp_path):
+    _glossary(tmp_path)
+    result = _chat(tmp_path)._t_standardize({
+        "files": ["10-received/Glossary.xlsx"],
+        "output": "bilingual_jsonl", "target_lang": "ja",
+        "columns": ["English"]})
+    assert "exactly two names" in result
+
+
+def test_standardize_can_write_outside_the_job_exports(tmp_path):
+    """A glossary belongs in the PROJECT's 40-reference/glossary/, where
+    every later stage resolves it — not in one job's exports/."""
+    _glossary(tmp_path)
+    chat = _chat(tmp_path)
+    with pytest.raises(ValueError) as excinfo:      # dry-run stops later
+        chat._t_standardize({
+            "files": ["10-received/Glossary.xlsx"],
+            "output": "bilingual_jsonl", "target_lang": "ja",
+            "columns": ["English", "日本語"],
+            "out_dir": "40-reference/glossary"})
+    # reaching the adapter proves out_dir resolved inside the project
+    assert "dry-run cannot generate an adapter" in str(excinfo.value)
+
+
+def test_out_dir_cannot_escape_the_project(tmp_path):
+    """out_dir is a real path from a model, so it goes through the WRITE
+    confinement like every other one — the turn loop turns the refusal
+    into an observation the agent sees."""
+    from orbit8.tenancy import TenantError
+
+    _glossary(tmp_path)
+    with pytest.raises(TenantError):
+        _chat(tmp_path)._t_standardize({
+            "files": ["10-received/Glossary.xlsx"],
+            "output": "source_json", "out_dir": "/etc"})
+
+
 # ---------------------------------------------- the bilingual contract
 
 def test_the_pair_validator_requires_all_three_fields():
@@ -258,10 +419,52 @@ def test_the_pair_validator_requires_all_three_fields():
 
 def test_the_pair_validator_keeps_empty_targets():
     """Opposite of the ingest validator, on purpose: for ingest an empty
-    string is noise, for LQA it is the finding."""
+    string is noise, for LQA it is the finding. Kept as long as SOMETHING
+    was translated — see the next test for the all-empty case."""
     from orbit8.codegen import validate_pairs
-    pairs = validate_pairs('[{"key":"A","source":"Start","target":""}]', "f")
-    assert pairs == [("A", "Start", "", "f")]
+    pairs = validate_pairs(
+        '[{"key":"A","source":"Start","target":"開始"},'
+        ' {"key":"B","source":"Quit","target":""}]', "f")
+    assert ("B", "Quit", "", "f") in pairs
+
+
+def test_an_all_empty_result_is_unsatisfiable_not_retryable():
+    """Every target empty is a fact about the INPUT, not a defect in the
+    generated code, so retrying spends model calls to fail identically.
+    The observed case burned ~190s and four calls trying to pair a
+    single-language file with itself."""
+    from orbit8.codegen import UnsatisfiableInput, validate_pairs
+    with pytest.raises(UnsatisfiableInput) as excinfo:
+        validate_pairs('[{"key":"A","source":"ゲーム開始","target":""}]', "f")
+    assert "ONE language" in str(excinfo.value)
+    assert "BOTH" in str(excinfo.value)
+
+
+def test_an_unsatisfiable_input_stops_the_retry_loop():
+    """One attempt, not MAX_ATTEMPTS."""
+    from orbit8.codegen import (BILINGUAL_SYSTEM, UnsatisfiableInput,
+                                generate_converter, validate_pairs)
+
+    calls = {"n": 0}
+
+    class _OneLanguageProvider:
+        name = "stub"
+        model = "stub"
+
+        def complete(self, system, prompt, **kw):
+            calls["n"] += 1
+            return ('import json,sys\n'
+                    'print(json.dumps([{"key":"A","source":"x",'
+                    '"target":""}]))')
+
+    import tempfile
+    path = Path(tempfile.mkstemp(suffix=".csv")[1])
+    path.write_text("Key,Japanese\nA,ゲーム開始\n", encoding="utf-8")
+    with pytest.raises(UnsatisfiableInput):
+        generate_converter(_OneLanguageProvider(), path,
+                           system_prompt=BILINGUAL_SYSTEM,
+                           validate=validate_pairs)
+    assert calls["n"] == 1                  # not 3
 
 
 def test_the_pair_validator_drops_rows_with_no_source():
