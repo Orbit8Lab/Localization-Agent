@@ -36,8 +36,15 @@ from .episodic import EpisodicMemory
 from .memory import RunDB
 from .schemas import IntakeBrief, Strict
 from .skill_docs import SkillLibrary
+from .tenancy import TenantError, resolve_read, resolve_write
 
 MAX_STEPS_PER_TURN = 14
+
+# How many times one tool may fail IDENTICALLY (same tool, same args, same
+# error) before the turn stops. Two, not one: a first retry is sometimes
+# reasonable (a transient read), but a second identical failure is proof
+# the inputs cannot produce a different outcome.
+REPEAT_FAILURE_LIMIT = 2
 
 # The context budget. Owned in ONE place (context.ContextAssembler) rather
 # than emerging from constants that never knew about each other: before
@@ -349,25 +356,48 @@ class ChatOrchestrator:
 
     # ------------------------------------------------------- file tools
 
+    @property
+    def project_root(self) -> Path:
+        """The folder holding this job's jobs root."""
+        return self.job.store.root.resolve().parent
+
+    @property
+    def tenant_id(self) -> str:
+        """The organization this job belongs to — the confidentiality
+        boundary for file access (see tenancy.py)."""
+        try:
+            return self.job.control.get("tenant_id") or "default"
+        except Exception:                      # pragma: no cover - guard
+            return "default"
+
     def _confine(self, raw: str) -> Path:
-        """File tools may only see the project folder (the parent of the
-        jobs root) — a tool boundary, not a prompt rule."""
-        project_root = self.job.store.root.resolve().parent
-        candidate = Path(raw)
-        if not candidate.is_absolute():
-            # relative paths are relative to the PROJECT folder, and "../"
-            # prefixes operators habitually copy from the jobs root are
-            # tolerated (confinement below still applies)
-            candidate = project_root / re.sub(r"^(\.\./)+", "",
-                                              raw.lstrip("/"))
-        path = candidate.resolve()
-        if not path.is_relative_to(project_root):
-            raise ValueError(f"path is outside the project folder "
-                             f"({project_root})")
-        return path
+        """Resolve a path for WRITING (and for reads that should not
+        cross a project boundary).
+
+        Stays inside this job's project folder, always. Cross-project
+        reads are a deliberate feature (`_confine_read`); cross-project
+        WRITES are not — even within one organization, a job writing into
+        another project's tree modifies assets nobody asked it to touch,
+        and 30-deliverables/ is meant to be immutable.
+        """
+        return resolve_write(raw, project_root=self.project_root)
+
+    def _confine_read(self, raw: str) -> Path:
+        """Resolve a path for READING, allowing same-organization
+        siblings.
+
+        An agent that cannot see the org's other projects cannot learn
+        from their glossaries, style guides or prior decisions — every
+        project starts from nothing. But the boundary is the ORGANIZATION
+        (`tenant_id`), not the folder: a sibling belonging to another
+        client is refused, and so is one whose owner cannot be confirmed.
+        Unmarked is treated as foreign, never as public.
+        """
+        return resolve_read(raw, project_root=self.project_root,
+                            tenant_id=self.tenant_id)
 
     def _t_list_files(self, args: dict) -> str:
-        directory = self._confine(str(args.get("dir", "")))
+        directory = self._confine_read(str(args.get("dir", "")))
         if not directory.is_dir():
             return f"error: not a directory: {directory}"
         entries = [(p.name + "/" if p.is_dir() else
@@ -377,7 +407,7 @@ class ChatOrchestrator:
         return json.dumps(entries[:60], ensure_ascii=False)
 
     def _t_inspect_file(self, args: dict) -> str:
-        path = self._confine(str(args.get("path", "")))
+        path = self._confine_read(str(args.get("path", "")))
         raw = path.read_bytes()
         info: Dict[str, object] = {"file": path.name, "bytes": len(raw)}
         if path.suffix.lower() == ".po":
@@ -861,6 +891,8 @@ class ChatOrchestrator:
         # straight to history (as this loop used to) put the very thing the
         # model was called about into the lowest, non-trimmable tier.
         evidence: List[str] = []
+        # (tool, args, error) -> how many times it has failed identically.
+        repeats: Dict[tuple, int] = {}
         for _ in range(MAX_STEPS_PER_TURN):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
@@ -909,6 +941,36 @@ class ChatOrchestrator:
             evidence.append(
                 f"[tool] {call.tool}"
                 f"({json.dumps(call.args, default=str)}) -> {observation}")
+
+            # Circuit breaker. Re-issuing a call that just failed the same
+            # way cannot succeed — the inputs are identical — so repeating
+            # it only burns the step budget and ends in a generic
+            # "step limit" message that hides the actual error. Observed:
+            # 14 identical `status` calls against a missing job, ~70s, and
+            # the operator never saw the error that explained it.
+            # Tools report failure two ways: by raising (caught above into
+            # `failed`) and by RETURNING an "error: …" string, which most
+            # of them do. Counting only exceptions would leave the second
+            # kind looping exactly as before.
+            outcome = failed or (observation
+                                 if observation.startswith("error:")
+                                 else None)
+            if outcome is not None:
+                signature = (call.tool,
+                             json.dumps(call.args, sort_keys=True,
+                                        default=str), outcome)
+                repeats[signature] = repeats.get(signature, 0) + 1
+                if repeats[signature] >= REPEAT_FAILURE_LIMIT:
+                    reply = (
+                        f"Stopping: `{call.tool}` failed the same way "
+                        f"{repeats[signature]} times and retrying cannot "
+                        f"change that.\n\n{observation}")
+                    self._retire_evidence(evidence)
+                    self.history.append(("operator", user_msg))
+                    self.history.append(("orbit8", reply))
+                    self._trace("abort", reason="repeated_failure",
+                                tool=call.tool, error=outcome)
+                    return reply
         self._retire_evidence(evidence)
         self.history.append(("operator", user_msg))
         reply = ("I hit the per-turn step limit before finishing — the job "

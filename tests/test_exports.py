@@ -145,4 +145,11 @@ def test_file_tools_confined_to_project(tmp_path: Path):
     ])
     chat = ChatOrchestrator(job, provider, operator="t", dry_run=True)
     chat.turn("read /etc/passwd")
-    assert "outside the project folder" in provider.prompts[1]
+    # Assert the REFUSAL and the path, not the wording: the boundary moved
+    # from "the project folder" to "the organization workspace"
+    # (tenancy.py) and the message moved with it, but a path outside both
+    # must still be refused and the model must be told which path failed.
+    observation = provider.prompts[1]
+    assert "error" in observation.lower()
+    assert "/etc/passwd" in observation
+    assert "outside" in observation

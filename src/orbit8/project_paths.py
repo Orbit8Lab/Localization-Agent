@@ -11,13 +11,28 @@ folder can never silently become the source of truth.
 """
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .standards import REFERENCE_DIR, WORK_DIR
+from .standards import RECEIVED_DIR, REFERENCE_DIR, WORK_DIR
 
 GLOSSARY_SUBDIR = "glossary"
 GLOSSARY_FILE = "glossary_terms.json"
+
+# Formats S1 ingests natively. Anything else needs the generated-adapter
+# path, which is a decision an operator should make deliberately rather
+# than have discovery make for them.
+SOURCE_SUFFIXES = (".json", ".po")
+
+# Files that live in a drop but are not the strings: reports, indexes and
+# the pipeline's own outputs. Matching by name because a client drop is
+# whatever the client sent, and the alternative — trusting a naming
+# convention nobody agreed to — fails silently.
+_NOT_SOURCE = re.compile(
+    r"(^|[._-])(report|summary|index|dedup|log|manifest|glossary|"
+    r"decisions?|bug|readme)([._-]|$)", re.I)
 
 # Directory names that mark a project root (any two is enough — projects
 # migrated at different times may lack one).
@@ -171,3 +186,151 @@ def promote_glossary(source: Path, project_root: Path) -> Path:
     if xlsx.exists():
         shutil.copy2(xlsx, target.with_suffix(".xlsx"))
     return target
+
+
+# ------------------------------------------------------ source discovery
+
+@dataclass
+class SourceCandidate:
+    """One file discovery thinks might be the strings to translate."""
+    path: Path
+    drop: str                    # the 10-received/<drop>/ it came from
+    entries: int = 0             # strings inside, 0 when unreadable
+    note: str = ""
+
+    def describe(self) -> str:
+        line = f"{self.path.name} ({self.entries} strings)"
+        if self.drop:
+            line += f"  in {RECEIVED_DIR}/{self.drop}"
+        if self.note:
+            line += f"  — {self.note}"
+        return line
+
+
+@dataclass
+class SourceDiscovery:
+    """What was found, and enough context to judge it.
+
+    Deliberately returns CANDIDATES rather than a chosen file. Picking the
+    source silently is the failure this avoids: a project folder holds
+    several drops, previous deliverables and reference material, and
+    quietly ingesting last month's drop produces a job that looks correct
+    and translates the wrong text. The operator confirms; discovery only
+    removes the typing.
+    """
+    project_root: Optional[Path]
+    candidates: List[SourceCandidate] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def found(self) -> bool:
+        return bool(self.candidates)
+
+    @property
+    def unambiguous(self) -> Optional[SourceCandidate]:
+        """The single candidate, when there is exactly one. Multiple
+        candidates are a question for a human, not a ranking problem."""
+        return self.candidates[0] if len(self.candidates) == 1 else None
+
+
+def _count_entries(path: Path) -> Tuple[int, str]:
+    """Strings in a source file, plus a note when it looks wrong.
+
+    Reading the file is the point: a name tells you nothing, and an empty
+    or malformed drop is exactly what an operator needs told BEFORE a job
+    is built on it.
+    """
+    try:
+        if path.suffix.lower() == ".json":
+            import json
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict):
+                return 0, "not a flat {key: text} object"
+            if not all(isinstance(v, str) for v in data.values()):
+                return 0, "values are not all strings (nested?)"
+            return len(data), ""
+        if path.suffix.lower() == ".po":
+            from .exports import read_po_entries
+            entries = read_po_entries(path)
+            filled = sum(1 for _k, _s, target, _c in entries
+                         if target.strip())
+            if filled:
+                # A .po with translations is a TARGET file. As a source it
+                # would feed the pipeline text that is already translated.
+                return len(entries), (f"{filled} msgstr already filled — "
+                                      f"this may be a target, not a source")
+            return len(entries), ""
+    except Exception as err:                      # unreadable is a finding
+        return 0, f"unreadable: {type(err).__name__}"
+    return 0, "unsupported format"
+
+
+def scaffold_project(root: Path) -> List[str]:
+    """Create the standard workspace directories under `root`.
+
+    Returns the names actually created, so the caller can report what
+    changed rather than silently reshaping someone's folder. Existing
+    directories are left alone — this only ever adds.
+
+    A project folder is often made before there is anything to put in it:
+    the client is signed, the folder exists in Drive, and the strings
+    arrive a week later. Requiring the layout to pre-exist made the tool
+    useless at exactly that moment.
+    """
+    created = []
+    for name in (RECEIVED_DIR, WORK_DIR, "30-deliverables", REFERENCE_DIR):
+        path = Path(root) / name
+        if not path.exists():
+            path.mkdir(parents=True)
+            created.append(name)
+    return created
+
+
+def discover_sources(start: Path, *,
+                     project_root: Optional[Path] = None) -> SourceDiscovery:
+    """Find likely source files for a new job under a project workspace.
+
+    Looks in ``10-received/`` — client drops — newest drop first, since the
+    newest is what a new job is almost always about. Every candidate is
+    read and counted rather than guessed at from its name.
+    """
+    root = Path(project_root) if project_root else find_project_root(start)
+    if root is None:
+        return SourceDiscovery(
+            project_root=None,
+            notes=[f"no project workspace found from {start} — expected a "
+                   f"folder containing {RECEIVED_DIR}/ and {WORK_DIR}/"])
+
+    received = root / RECEIVED_DIR
+    if not received.is_dir():
+        return SourceDiscovery(
+            project_root=root,
+            notes=[f"{RECEIVED_DIR}/ does not exist under {root}"])
+
+    candidates: List[SourceCandidate] = []
+    notes: List[str] = []
+    # Newest drop first: drops are date-named by convention, and when they
+    # are not, mtime is a better guess than alphabetical order.
+    drops = sorted((d for d in received.iterdir() if d.is_dir()),
+                   key=lambda d: (d.name, d.stat().st_mtime), reverse=True)
+    # Loose files directly in 10-received/ count as an unnamed drop.
+    searchable = [*drops, received]
+    for drop in searchable:
+        for path in sorted(drop.iterdir()):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in SOURCE_SUFFIXES:
+                continue
+            if _NOT_SOURCE.search(path.stem):
+                continue
+            entries, note = _count_entries(path)
+            if entries == 0 and note:
+                notes.append(f"skipped {path.name}: {note}")
+                continue
+            candidates.append(SourceCandidate(
+                path=path, entries=entries, note=note,
+                drop="" if drop == received else drop.name))
+    if not candidates and not notes:
+        notes.append(f"no .json or .po files under {RECEIVED_DIR}/")
+    return SourceDiscovery(project_root=root, candidates=candidates,
+                           notes=notes)

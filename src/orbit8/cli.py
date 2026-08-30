@@ -44,6 +44,13 @@ def _cmd_init(args) -> int:
         reference_titles=(args.references.split(",")
                           if args.references else []),
         tenant_id=args.tenant)
+    # Co-locating two organizations under one jobs root defeats the file
+    # boundary: they share a project folder, and the file tools treat that
+    # folder as home ground for both.
+    from .tenancy import mixed_tenant_warning
+    warning = mixed_tenant_warning(Path(args.root), intake.tenant_id)
+    if warning:
+        print(warning, file=sys.stderr)
     job = Job.init(Path(args.root), args.job_id, intake=intake,
                    source_files=args.source, pilot_size=args.pilot_size,
                    tester_hours=args.tester_hours)
@@ -987,10 +994,186 @@ class _LiveStatus:
             print(final, flush=True)
 
 
+def _cmd_new(args) -> int:
+    """Describe a project in prose; a model proposes the intake; you commit.
+
+    The confirmation step is not a courtesy. The intake form is the job's
+    constitution — `source_lang` and `target_locales` decide what every
+    later stage does — so the model's role stops at *proposing*. Nothing is
+    written until a human says yes, and validation runs before they are
+    asked, so an obviously wrong locale never reaches the prompt.
+    """
+    from .intake_wizard import propose_intake, render, review, to_intake
+
+    from .project_paths import discover_sources, scaffold_project
+
+    root = Path(args.root)
+    if not root.exists():
+        root.mkdir(parents=True)
+        print(f"created {root}")
+    # A project folder is routinely made before there is anything in it —
+    # the client is signed, the folder exists, the strings arrive later.
+    # Scaffolding here means `orbit8 new` works at that moment instead of
+    # demanding a layout the operator has not built yet.
+    created = scaffold_project(root)
+    if created:
+        print(f"created project structure: {', '.join(created)}")
+
+    sources = list(args.source or ())
+    if not sources:
+        # Discovery, not guessing: look under the project's 10-received/
+        # and SHOW what was found. A single unambiguous candidate is
+        # offered as a default; several are a question, because silently
+        # ingesting last month's drop builds a job that looks correct and
+        # translates the wrong text.
+        found = discover_sources(root)
+        # Only worth saying when something WAS found but partly skipped.
+        # On a fresh project "no .json or .po files under 10-received/" is
+        # the expected state, not a problem, and printing it before the
+        # friendlier explanation below reads like an error.
+        if found.found:
+            for note in found.notes:
+                print(f"  {note}", file=sys.stderr)
+            print(f"\nSource files under {found.project_root}:")
+            for index, candidate in enumerate(found.candidates, 1):
+                print(f"  {index}. {candidate.describe()}")
+            only = found.unambiguous
+            prompt = ("Use this source? [Y/n] " if only else
+                      f"Which source? [1-{len(found.candidates)}] ")
+            answer = input(f"\n{prompt}").strip().lower()
+            if only and answer in ("", "y", "yes"):
+                sources = [str(only.path)]
+            elif answer.isdigit() and 1 <= int(answer) <= len(
+                    found.candidates):
+                sources = [str(found.candidates[int(answer) - 1].path)]
+        if not sources:
+            # No source is a VALID state, not a failure. The job sits at
+            # INTAKE/G0 perfectly well; only S1 (INGEST) needs the
+            # strings, which is exactly where a missing source should
+            # stop things. Refusing here would block the common case of
+            # setting a project up before the drop arrives.
+            print(f"\nNo source file yet — the job will be created and wait "
+                  f"at INTAKE.\nDrop the strings into "
+                  f"{root.name}/10-received/ and re-run "
+                  f"`orbit8 next` when they arrive.")
+            if input("Continue without a source? [Y/n] ").strip().lower() \
+                    not in ("", "y", "yes"):
+                print("cancelled")
+                return 1
+
+    description = args.describe or input(
+        "Describe the project (game, source language, target locales, "
+        "genre):\n> ").strip()
+    if not description:
+        print("nothing to propose from", file=sys.stderr)
+        return 2
+
+    provider = OpenAICompatProvider(args.provider, model=args.model,
+                                    api_key=args.api_key)
+    print("proposing intake…")
+    result = propose_intake(provider, description,
+                            source_files=sources)
+
+    while True:
+        print(render(result, sources))
+        if not result.ok:
+            # Errors block creation rather than warn: these are the values
+            # the whole pipeline inherits, and "confirm anyway" would make
+            # the validation decorative.
+            print("\nFix the errors above (edit with --describe, or pass "
+                  "explicit flags to `orbit8 job init`).")
+            return 1
+        answer = input("\nCreate this job? [y/N/edit] ").strip().lower()
+        if answer in ("y", "yes"):
+            break
+        if answer in ("e", "edit"):
+            note = input("What should change? ").strip()
+            if note:
+                result = propose_intake(
+                    provider, f"{description}\n\nCorrection: {note}",
+                    source_files=sources)
+                continue
+        print("cancelled — nothing was created")
+        return 1
+
+    job = Job.init(root, result.proposal.job_id,
+                   intake=to_intake(result.proposal, tenant_id=args.tenant),
+                   source_files=sources,
+                   pilot_size=args.pilot_size)
+    print(f"\njob initialized: {job.store.job_dir}")
+    _print_stage(job.derive())
+    print(f"\nNext:  uv run orbit8 next {root} {result.proposal.job_id} "
+          f"--dry-run")
+    return 0
+
+
+def _cmd_job_list(args) -> int:
+    """Answer "what am I running" without needing to know a job id first.
+
+    Every other command takes the job id as a required argument, so an
+    operator returning to a machine — or opening someone else's — had no
+    way to discover what was there short of reading the directory. Phase
+    and pending gate come from the artifact tree, the same authoritative
+    derivation `status` uses.
+    """
+    root = Path(args.root)
+    job_ids = _existing_jobs(root)
+    if not job_ids:
+        print(f"no jobs under {root}")
+        print(f"\nStart one:\n  uv run orbit8 job init {root} <job-id> \\\n"
+              f"      --game <name> --source <file> --source-lang zh \\\n"
+              f"      --targets <locales> --genre <genre>")
+        return 0
+
+    print(f"{'job':<24}{'phase':<14}{'gate':<6}next")
+    print("-" * 78)
+    for job_id in job_ids:
+        try:
+            stage = Job(root, job_id).derive()
+        except Exception as err:            # a damaged tree is still a job
+            print(f"{job_id:<24}{'?':<14}{'?':<6}unreadable: {err}")
+            continue
+        gate = stage.gate or "-"
+        detail = stage.action
+        if stage.target:
+            detail += f" [{stage.target}]"
+        print(f"{job_id:<24}{stage.phase:<14}{gate:<6}{detail[:34]}")
+    print(f"\n{len(job_ids)} job(s). Open one:  "
+          f"uv run orbit8 chat {root} <job-id> --by <name>")
+    return 0
+
+
+def _existing_jobs(root: Path) -> list:
+    """Job ids under `root`. A mistyped id is at least as likely as a
+    missing one, so naming what IS there turns a dead end into a fix."""
+    if not root.is_dir():
+        return []
+    return sorted(child.name for child in root.iterdir()
+                  if (child / "job.json").exists())
+
+
 def _cmd_chat(args) -> int:
     from datetime import datetime
     from .orchestrator import ChatOrchestrator
     job = Job(Path(args.root), args.job_id)
+    # Refuse to open a session on a job that does not exist. Without this
+    # the agent answers questions about a phantom job: `derive()` reports
+    # INTAKE/"waiting on intake form" for a missing tree exactly as it does
+    # for a real new one, the stage playbook loads, and the model states a
+    # phase it never verified. Every tool call then fails identically until
+    # the step budget runs out.
+    if not job.store.job_json.exists():
+        print(f"no job at {args.root}/{args.job_id}", file=sys.stderr)
+        print(f"\nCreate it first:\n"
+              f"  uv run orbit8 job init {args.root} {args.job_id} \\\n"
+              f"      --game <name> --source <file> --source-lang zh \\\n"
+              f"      --targets <locales> --genre <genre>\n",
+              file=sys.stderr)
+        existing = _existing_jobs(Path(args.root))
+        if existing:
+            print(f"Jobs under {args.root}: {', '.join(existing)}",
+                  file=sys.stderr)
+        return 2
     provider = OpenAICompatProvider(args.provider, model=args.model,
                                     api_key=args.api_key)
     factory = lambda locale: OpenAICompatProvider(
@@ -1321,6 +1504,29 @@ def main(argv=None) -> int:
 
     job = sub.add_parser("job", help="job-level commands")
     job_sub = job.add_subparsers(dest="job_command", required=True)
+    new = sub.add_parser(
+        "new",
+        help="describe a project in words; a model proposes the intake "
+             "form and you confirm it before anything is created")
+    new.add_argument("root", nargs="?", default="jobs",
+                     help="jobs root directory (default: ./jobs)")
+    new.add_argument("--describe", help="skip the prompt and pass the "
+                                        "description directly")
+    new.add_argument("--source", nargs="+", help="source files (.json/.po)")
+    new.add_argument("--tenant", default="default")
+    new.add_argument("--pilot-size", type=int, default=30)
+    new.add_argument("--provider", default="deepseek",
+                     choices=sorted(PROVIDER_PRESETS))
+    new.add_argument("--model")
+    new.add_argument("--api-key")
+    new.set_defaults(func=_cmd_new)
+
+    job_list = job_sub.add_parser(
+        "list", help="what jobs exist here, and where each one is")
+    job_list.add_argument("root", nargs="?", default="jobs",
+                          help="jobs root directory (default: ./jobs)")
+    job_list.set_defaults(func=_cmd_job_list)
+
     init = job_sub.add_parser("init", help="create a job from an intake form")
     init.add_argument("root", help="jobs root directory")
     init.add_argument("job_id")
