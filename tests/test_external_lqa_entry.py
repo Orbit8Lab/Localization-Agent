@@ -934,3 +934,53 @@ def test_the_agent_warns_when_terms_are_not_locked(tmp_path):
         "target_column": "日本語", "locale": "ja"}))
     assert not result["locked"]
     assert "ADVISORY" in result["next"]
+
+
+def test_each_locale_resolves_its_own_termbase(tmp_path):
+    """The canonical glossary name carries NO locale while a job routinely
+    has several. Without the per-locale form a four-locale project
+    resolves ONE termbase for all of them — a Japanese rendering becomes
+    law for Korean strings, and every correct Korean term is reported as a
+    defect from a file that looks properly installed."""
+    from orbit8.cli import main
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    (project / "40-reference" / "glossary").mkdir(parents=True)
+    pytest.importorskip("openpyxl")
+    import openpyxl
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["English", "日本語", "한국어"])
+    sheet.append(["Barrier", "バリア", "방벽"])
+    book.save(tmp_path / "terms.xlsx")
+
+    for locale, column in (("ja", "日本語"), ("ko", "한국어")):
+        main(["glossary", "from-sheet", str(tmp_path / "terms.xlsx"),
+              "--source-column", "English", "--target-column", column,
+              "--locale", locale, "--lock",
+              "--out", str(project / "40-reference" / "glossary"
+                           / f"glossary_terms.{locale}.json")])
+
+    job = Job.init(project / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja", "ko"]),
+                   source_files=[])
+    assert job._glossary("ja").locked_map(True)["Barrier"] == "バリア"
+    assert job._glossary("ko").locked_map(True)["Barrier"] == "방벽"
+
+
+def test_the_locale_less_termbase_still_resolves(tmp_path):
+    """Single-locale projects keep working: the canonical name is the
+    fallback, not a casualty."""
+    from orbit8.project_paths import resolve_glossary
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    glossary = project / "40-reference" / "glossary"
+    glossary.mkdir(parents=True)
+    (glossary / "glossary_terms.json").write_text(
+        json.dumps({"metadata": {}, "terms": {}}), encoding="utf-8")
+
+    found, _notes = resolve_glossary(project_root=project, locale="ja")
+    assert found == glossary / "glossary_terms.json"

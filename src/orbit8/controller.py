@@ -283,7 +283,7 @@ class Job:
             # never ran.
             from .project_paths import resolve_glossary
             promoted, _notes = resolve_glossary(
-                start=self.store.root.resolve().parent)
+                start=self.store.root.resolve().parent, locale=locale)
             if promoted is not None and promoted.exists():
                 payload = json.loads(promoted.read_text(encoding="utf-8"))
                 # Accept both the envelope and the bare T1 shape: a

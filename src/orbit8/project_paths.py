@@ -61,15 +61,22 @@ def canonical_glossary(project_root: Path) -> Path:
 
 def resolve_glossary(hint: Optional[Path] = None,
                      project_root: Optional[Path] = None,
-                     start: Optional[Path] = None
+                     start: Optional[Path] = None,
+                     locale: Optional[str] = None
                      ) -> Tuple[Optional[Path], List[str]]:
     """Locate the glossary to use. Returns (path, notes).
 
-    Order: an explicit ``hint`` always wins; otherwise the canonical
-    ``40-reference/glossary/glossary_terms.json``; otherwise the newest
-    run output under ``20-work/`` — which is reported as a WARNING,
-    because consuming a run folder means the project has no promoted
-    glossary yet.
+    Order: an explicit ``hint`` always wins; then the PER-LOCALE termbase
+    ``glossary_terms.<locale>.json``; then the canonical locale-less
+    ``glossary_terms.json``; otherwise the newest run output under
+    ``20-work/`` — reported as a WARNING, because consuming a run folder
+    means the project has no promoted glossary yet.
+
+    The per-locale form exists because the canonical name carries no
+    locale while a job routinely has several. Without it a four-locale
+    project resolves ONE termbase for all of them, and a Japanese
+    rendering becomes law for Korean strings — every correct Korean term
+    reported as a defect, from a file that looks properly installed.
     """
     notes: List[str] = []
     if hint:
@@ -87,6 +94,12 @@ def resolve_glossary(hint: Optional[Path] = None,
         notes.append("no project workspace found (need a folder with "
                      "10-received/ 20-work/ 40-reference/)")
         return None, notes
+
+    if locale:
+        per_locale = (root / REFERENCE_DIR / GLOSSARY_SUBDIR
+                      / f"glossary_terms.{locale}.json")
+        if per_locale.exists():
+            return per_locale, notes
 
     canonical = canonical_glossary(root)
     if canonical.exists():
