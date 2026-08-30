@@ -217,6 +217,14 @@ DeepSeek. Outputs a stream-patched copy (untouched entries \
 byte-identical), the standard MTPE form for post-editing, and a report. \
 This is a WORK PRODUCT, not a delivery — deliveries go through \
 deliver_po after post-editing.
+- {"tool": "lqa_run", "args": {"pairs": "<bilingual .jsonl>", "locale": \
+"<target locale>", "name": "<audit name>", "deterministic_only": false}} \
+— audit a bilingual JSONL through the tier cascade (T1 mechanical → T2 \
+consistency → T3 semantic → verifier), attempt-versioned under s5. This \
+is what a `standardize` → bilingual_jsonl output feeds: use it for \
+.jsonl, `scan_po` for a .po. Run it ONCE PER LOCALE — the cascade audits \
+one language pair at a time, so give each run its own "name" or later \
+locales overwrite earlier ones.
 - {"tool": "scan_po", "args": {"po": "<translated bilingual .po>", \
 "glossary": "<optional — defaults to the project's active termbase>", \
 "out_dir": "<work folder>", "game": "<name>", \
@@ -436,14 +444,29 @@ class ChatOrchestrator:
                             tenant_id=self.tenant_id)
 
     def _t_list_files(self, args: dict) -> str:
-        directory = self._confine_read(str(args.get("dir", "")))
+        raw = str(args.get("dir", ""))
+        directory = self._confine_read(raw)
         if not directory.is_dir():
             return f"error: not a directory: {directory}"
+        children = [p for p in sorted(directory.iterdir())
+                    if p.name != ".DS_Store"]
         entries = [(p.name + "/" if p.is_dir() else
-                    f"{p.name} ({p.stat().st_size}B)")
-                   for p in sorted(directory.iterdir())
-                   if p.name not in (".DS_Store",)]
-        return json.dumps(entries[:60], ensure_ascii=False)
+                    f"{p.name} ({p.stat().st_size}B)") for p in children]
+        # A bare name list left the model unable to say what to pass next,
+        # so it re-listed the same directory five times. Returning the
+        # DIRECTORY and ready-to-use child paths makes the next call
+        # obvious instead of a guess.
+        subdirs = [f"{raw.rstrip('/')}/{p.name}" if raw else p.name
+                   for p in children if p.is_dir()]
+        result = {"dir": str(directory), "entries": entries[:60]}
+        if subdirs:
+            result["subdirectories"] = subdirs[:20]
+            result["note"] = ("To look inside one, call list_files again "
+                              "with a path from 'subdirectories' — not "
+                              "the same 'dir' as this call.")
+        if len(entries) > 60:
+            result["truncated"] = f"{len(entries) - 60} more not shown"
+        return json.dumps(result, ensure_ascii=False)
 
     @staticmethod
     def _tabular_preview(path: Path, suffix: str) -> Dict[str, object]:
@@ -889,6 +912,49 @@ class ChatOrchestrator:
              "mtpe_form": str(Path(str(args.get("out_dir", "")))
                               / "mtpe_form.xlsx")}, ensure_ascii=False)
 
+    def _t_lqa_run(self, args: dict) -> str:
+        """Audit a bilingual JSONL through the full tier cascade.
+
+        `scan_po` reads .po only, so an agent that had just produced
+        `pairs_en-ja.jsonl` with `standardize` had nowhere to take it —
+        the cascade existed in the CLI and not in the tool set, which
+        made the conversion a dead end. This is the same
+        `run_external_lqa` the CLI calls: T1 mechanical → T2 consistency
+        → T3 semantic → verifier, attempt-versioned under s5.
+        """
+        from .external_lqa import run_external_lqa
+
+        pairs = self._confine_read(str(args.get("pairs", "")))
+        if not pairs.exists():
+            return f"error: no pairs file at {pairs}"
+        locale = str(args.get("locale") or "")
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        if locale and locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+        deterministic = bool(args.get("deterministic_only"))
+        provider = None if (deterministic or self.dry_run) else self.provider
+        # Name the run after the locale so several audits coexist: one
+        # report per language pair is what the cascade produces, and
+        # overwriting them would lose every earlier locale's findings.
+        name = str(args.get("name") or f"{locale or 'audit'}-audit")
+        try:
+            report = run_external_lqa(
+                self.job, provider, pairs, name=name,
+                deterministic_only=deterministic or provider is None)
+        except Exception as err:
+            return f"error: {type(err).__name__}: {err}"
+        return json.dumps({
+            "status": "complete", "name": name, "locale": locale,
+            "checked": report.checked,
+            "flagged_strings": report.flagged_strings,
+            "findings_total": report.findings_total,
+            "by_severity": report.by_severity,
+            "by_bug_type": report.by_bug_type,
+            "next": (f"Audit '{name}' is DONE — do not re-run it. Report "
+                     f"the counts; `orbit8 lqa report` turns it into a "
+                     f"client xlsx.")}, ensure_ascii=False)
+
     def _t_scan_po(self, args: dict) -> str:
         from .po_scan import scan_po
         from .project_paths import resolve_glossary
@@ -1076,7 +1142,8 @@ class ChatOrchestrator:
                 "extract_glossary": self._t_extract_glossary,
                 "add_glossary_terms": self._t_add_glossary_terms,
                 "translate_po": self._t_translate_po,
-                "scan_po": self._t_scan_po}
+                "scan_po": self._t_scan_po,
+                "lqa_run": self._t_lqa_run}
 
     @classmethod
     def tool_names(cls) -> frozenset:

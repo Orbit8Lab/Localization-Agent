@@ -586,3 +586,88 @@ def test_a_stored_adapter_is_re_run_behind_the_same_wall():
 
     from orbit8.codegen import run_adapter
     assert "validate" in inspect.signature(run_adapter).parameters
+
+
+# --------------------------------- the agent's own route into the cascade
+
+def test_the_agent_can_audit_a_bilingual_jsonl(tmp_path):
+    """`run_external_lqa` lived in the CLI and NOT in the tool set, so an
+    agent that had just produced pairs_en-ja.jsonl with `standardize` had
+    nowhere to take it — `scan_po` reads .po only. The conversion was a
+    dead end, and the agent correctly reported it could not proceed."""
+    chat = _multi_locale_chat(tmp_path)
+    pairs = tmp_path / "proj" / "pairs.jsonl"
+    pairs.write_text(json.dumps({
+        "key": "A", "source_language": "en", "target_language": "ja",
+        "source_text": "Start Game", "target_text": "ゲーム開始"},
+        ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = json.loads(chat._t_lqa_run(
+        {"pairs": "pairs.jsonl", "locale": "ja",
+         "deterministic_only": True}))
+    assert result["status"] == "complete"
+    assert result["checked"] == 1
+
+
+def test_lqa_run_is_in_the_tool_set():
+    from orbit8.orchestrator import ChatOrchestrator
+    assert "lqa_run" in ChatOrchestrator.tool_names()
+
+
+def test_each_locale_audit_gets_its_own_name(tmp_path):
+    """One report per language pair — a shared name would overwrite every
+    earlier locale's findings."""
+    chat = _multi_locale_chat(tmp_path)
+    pairs = tmp_path / "proj" / "p.jsonl"
+    pairs.write_text(json.dumps({
+        "key": "A", "source_language": "en", "target_language": "ja",
+        "source_text": "Start", "target_text": "開始"},
+        ensure_ascii=False) + "\n", encoding="utf-8")
+
+    first = json.loads(chat._t_lqa_run(
+        {"pairs": "p.jsonl", "locale": "ja", "deterministic_only": True}))
+    second = json.loads(chat._t_lqa_run(
+        {"pairs": "p.jsonl", "locale": "ko", "deterministic_only": True}))
+    assert first["name"] != second["name"]
+
+
+def test_an_unknown_locale_is_refused(tmp_path):
+    chat = _multi_locale_chat(tmp_path)
+    pairs = tmp_path / "proj" / "p.jsonl"
+    pairs.write_text("{}\n", encoding="utf-8")
+    assert "not a target locale" in chat._t_lqa_run(
+        {"pairs": "p.jsonl", "locale": "fr"})
+
+
+def test_a_missing_pairs_file_is_reported(tmp_path):
+    chat = _multi_locale_chat(tmp_path)
+    assert "no pairs file" in chat._t_lqa_run(
+        {"pairs": "nope.jsonl", "locale": "ja"})
+
+
+# ----------------------------------------- listing a directory usefully
+
+def test_a_listing_names_the_directory_and_its_children(tmp_path):
+    """A bare name list left the model unable to say what to pass next,
+    so it re-listed the same directory five times before the loop breaker
+    stopped it."""
+    chat = _multi_locale_chat(tmp_path)
+    received = tmp_path / "proj" / "10-received" / "drop"
+    received.mkdir(parents=True)
+    (received / "a.xlsx").write_bytes(b"x")
+
+    result = json.loads(chat._t_list_files({"dir": "10-received"}))
+    assert result["dir"].endswith("10-received")
+    assert result["subdirectories"] == ["10-received/drop"]
+    assert "not the same 'dir'" in result["note"]
+
+
+def test_a_listing_without_subdirectories_has_no_note(tmp_path):
+    chat = _multi_locale_chat(tmp_path)
+    flat = tmp_path / "proj" / "flat"
+    flat.mkdir(parents=True)
+    (flat / "a.txt").write_text("x", encoding="utf-8")
+
+    result = json.loads(chat._t_list_files({"dir": "flat"}))
+    assert "subdirectories" not in result
+    assert result["entries"] == ["a.txt (1B)"]
