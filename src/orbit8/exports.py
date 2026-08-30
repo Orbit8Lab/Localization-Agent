@@ -93,33 +93,64 @@ def emit_bilingual_jsonl(files: List[Path], path: Path, *,
     Sanity guard: when msgstr overwhelmingly equals msgid, the file is a
     SOURCE-language export (e.g. English.po), not a translation — pairing
     it would produce useless en→en rows, so refuse with guidance."""
+    non_po = [Path(f) for f in files if Path(f).suffix.lower() != ".po"]
+    if non_po:
+        if len(non_po) != len(files):
+            raise ValueError("mixing .po with other formats is not "
+                             "supported — convert them separately")
+        if fallback is None:
+            raise ValueError(
+                f"bilingual export reads .po natively; got "
+                f"{non_po[0].name!r}. Converting it needs the "
+                f"adapter-writer — run without --dry-run.")
+        # The WHOLE set goes to the adapter at once. Looping file-by-file
+        # is what made a per-locale layout unreadable: shown one file, an
+        # adapter finds a single text column and has nothing to pair it
+        # with. What layout these files are in is the adapter's judgment
+        # to make, and it can only make it having seen them together.
+        context = (
+            f"This job translates {source_lang} → {target_lang}. You are "
+            f"extracting the {target_lang} translations for review.\n"
+            f"Files given, in argv order: "
+            + ", ".join(f"argv[{n + 1}]={p.name}"
+                        for n, p in enumerate(non_po)))
+        pairs = list(fallback(non_po, context=context))
+        empty = sum(1 for _k, _s, target, _l in pairs if not target.strip())
+        identical = sum(1 for _k, source, target, _l in pairs
+                        if target.strip() and source.strip() == target.strip())
+        return _write_pairs(pairs, path, source_lang=source_lang,
+                            target_lang=target_lang, empty=empty,
+                            identical=identical)
+
     pairs, empty, identical = [], 0, 0
     for file in files:
-        if Path(file).suffix.lower() != ".po":
-            # Non-.po formats go through the Adapter-Writer, the same way
-            # source ingest already does. Rejecting them outright meant a
-            # client sending an xlsx of translations for review had no way
-            # in at all, while the identical file as a SOURCE was handled
-            # fine — an asymmetry, not a decision.
-            if fallback is None:
-                raise ValueError(
-                    f"bilingual export reads .po natively; got "
-                    f"{Path(file).name!r}. Converting it needs the "
-                    f"adapter-writer — run without --dry-run.")
-            for key, source, target, location in fallback(Path(file)):
-                if not target.strip():
-                    empty += 1
-                elif source.strip() == target.strip():
-                    identical += 1
-                pairs.append((key, source, target, location))
-            continue
         for key, source, target, location in read_po_entries(Path(file)):
             if not target.strip():
                 empty += 1
             elif source.strip() == target.strip():
                 identical += 1
             pairs.append((key, source, target, location))
+    return _write_pairs(pairs, path, source_lang=source_lang,
+                        target_lang=target_lang, empty=empty,
+                        identical=identical)
+
+
+def _write_pairs(pairs, path: Path, *, source_lang: str, target_lang: str,
+                 empty: int, identical: int) -> Tuple[int, int]:
+    """Validate a pair set and write it. Shared by the .po path and the
+    adapter path so neither can skip a guard the other enforces."""
     filled = len(pairs) - empty
+    if pairs and not filled:
+        # EVERY target empty means the input held ONE language, not two —
+        # a per-locale export whose partner source file lives elsewhere.
+        # Writing it anyway produced 400 rows of the target language
+        # mislabelled as source, with nothing to review: shaped like valid
+        # input, useless as one, and silent about it.
+        raise ValueError(
+            f"all {len(pairs)} rows have an empty target — the input holds "
+            f"ONE language, so there is nothing to review. If the "
+            f"translations live in a separate file from the source, pass "
+            f"BOTH: the source file first, then the target file.")
     if filled and identical / filled > 0.8:
         raise ValueError(
             f"{identical}/{filled} pairs have identical source and "

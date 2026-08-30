@@ -46,11 +46,16 @@ from .tenancy import TenantError, resolve_read, resolve_write
 # repeat-call breaker below is what actually stops those.
 MAX_STEPS_PER_TURN = 20
 
-# How many times one tool may fail IDENTICALLY (same tool, same args, same
-# error) before the turn stops. Two, not one: a first retry is sometimes
-# reasonable (a transient read), but a second identical failure is proof
-# the inputs cannot produce a different outcome.
+# How many times one tool may return an IDENTICAL result (same tool, same
+# args, same output) before the turn stops.
+#
+# Two was too tight for SUCCESS: re-reading a directory listing before
+# acting on it is ordinary planning, and cutting the turn there stopped
+# real work. Three is the point where it is a loop rather than a
+# re-read. Failures keep the tighter bound — an identical error cannot
+# become a different one, so a second attempt is already pointless.
 REPEAT_FAILURE_LIMIT = 2
+REPEAT_SUCCESS_LIMIT = 3
 
 # The context budget. Owned in ONE place (context.ContextAssembler) rather
 # than emerging from constants that never knew about each other: before
@@ -552,8 +557,22 @@ class ChatOrchestrator:
             count = emit_flat_json(records, out)
             return json.dumps({"written": count, "path": str(out)})
         if output == "bilingual_jsonl":
-            locale = str(args.get("target_lang")
-                         or intake.target_locales[0])
+            # Never guess the locale when several are configured. Falling
+            # back to target_locales[0] labelled a Japanese file "zh-CN"
+            # and wrote 400 rows nobody could use — a mislabelled export
+            # is worse than a refusal, because it looks fine.
+            locale = str(args.get("target_lang") or "")
+            if not locale:
+                if len(intake.target_locales) != 1:
+                    return (f"error: this job has "
+                            f"{len(intake.target_locales)} target locales "
+                            f"({', '.join(intake.target_locales)}); pass "
+                            f'"target_lang" to say which one this file '
+                            f"holds")
+                locale = intake.target_locales[0]
+            if locale not in intake.target_locales:
+                return (f"error: {locale!r} is not a target locale of this "
+                        f"job ({', '.join(intake.target_locales)})")
             name = str(args.get("out_name")
                        or f"pairs_{intake.source_lang}-{locale}")
             if not name.endswith(".jsonl"):
@@ -1088,7 +1107,9 @@ class ChatOrchestrator:
                          json.dumps(call.args, sort_keys=True, default=str),
                          outcome if outcome is not None else observation)
             repeats[signature] = repeats.get(signature, 0) + 1
-            if repeats[signature] >= REPEAT_FAILURE_LIMIT:
+            limit = (REPEAT_FAILURE_LIMIT if outcome is not None
+                     else REPEAT_SUCCESS_LIMIT)
+            if repeats[signature] >= limit:
                 verb = ("failed the same way" if outcome is not None
                         else "returned the same result")
                 reply = (

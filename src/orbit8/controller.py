@@ -325,19 +325,35 @@ class Job:
         from .codegen import (AdapterRecord, generate_bilingual_adapter,
                               run_adapter, validate_pairs)
 
-        def fallback(path: Path):
-            name = f"bilingual_adapter{path.suffix.replace('.', '_')}"
+        def fallback(paths, *, context: str = ""):
+            """`paths` is the WHOLE file set for one locale, not one file.
+
+            Passing files one at a time is what produced unusable output:
+            shown only `Game_ja.xlsx`, an adapter can find a single text
+            column and nothing to pair it with, so it emitted Japanese as
+            `source` with an empty `target` — correctly shaped, useless,
+            and silent. The layout is only legible when the adapter sees
+            the source export and the target export together.
+            """
+            files = ([Path(paths)] if isinstance(paths, (str, Path))
+                     else [Path(p) for p in paths])
+            # Keyed by the SET of suffixes and how many files: a two-file
+            # pairing adapter is not the one-file column-splitter, and
+            # reusing either for the other would silently misread a drop.
+            tag = "-".join(sorted({p.suffix.replace('.', '_')
+                                   for p in files}))
+            name = f"bilingual_adapter{tag}_x{len(files)}"
             if self.store.exists(1, name):
                 stored = self.store.read(1, name, AdapterRecord)
-                return run_adapter(stored.script, path,
+                return run_adapter(stored.script, files,
                                    validate=validate_pairs)
             if dry_run:
                 raise ValueError(
-                    f"unsupported format {path.suffix!r} and dry-run cannot "
-                    f"generate an adapter — run without --dry-run once, or "
-                    f"convert the file to .po")
+                    f"unsupported format {files[0].suffix!r} and dry-run "
+                    f"cannot generate an adapter — run without --dry-run "
+                    f"once, or convert the file to .po")
             record, pairs, fingerprint = generate_bilingual_adapter(
-                provider, path)
+                provider, files, context=context)
             self.store.write(1, name, record,
                              produced_by="agent:bilingual-adapter-writer@1",
                              model_fingerprint=fingerprint)

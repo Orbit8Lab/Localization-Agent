@@ -85,9 +85,19 @@ def _sample_of(path: Path, raw: bytes) -> str:
 
 def _write_converter(provider: Provider, system_prompt: str, suffix: str,
                      sample: str, previous_script: Optional[str],
-                     previous_error: Optional[str]) -> Tuple[str, str]:
-    sections = [f"Input format: a {suffix!r} file. First {SAMPLE_BYTES} "
-                f"bytes of a real example:\n---\n{sample}\n---"]
+                     previous_error: Optional[str],
+                     context: str = "") -> Tuple[str, str]:
+    sections = []
+    if context:
+        # What the adapter was previously denied. Told only "find the
+        # source and target columns in this file", it answered correctly
+        # for a single-language export — one text column into `source`,
+        # `target` empty — and the result was useless. The file NAMES and
+        # the job's languages are what make the layout legible.
+        sections.append(context)
+    sections.append(f"Input format: a {suffix!r} file. First "
+                    f"{SAMPLE_BYTES} bytes of a real example:"
+                    f"\n---\n{sample}\n---")
     if previous_script:
         sections.append("Your previous adapter:\n" + previous_script)
         sections.append("It FAILED with:\n" + (previous_error or "unknown")
@@ -127,56 +137,83 @@ def validate_stdout(stdout: str, file_ref: str) -> List[SourceString]:
     return records
 
 
-def run_converter(script: str, path: Path, validate) -> list:
-    """Deterministic re-run of a stored converter script."""
-    result = run_sandboxed(script, path)
+def run_converter(script: str, path, validate) -> list:
+    """Deterministic re-run of a stored converter script.
+
+    ``path`` is one file or a sequence — a stored adapter must be re-run
+    against the same shape of input it was generated for.
+    """
+    paths = ([Path(path)] if isinstance(path, (str, Path))
+             else [Path(p) for p in path])
+    result = run_sandboxed(script, paths)
     if not result.ok:
         raise ValueError(f"adapter failed (rc={result.returncode}"
                          f"{', timeout' if result.timed_out else ''}): "
                          f"{result.stderr[:500]}")
-    return validate(result.stdout, str(path))
+    return validate(result.stdout, str(paths[0]))
 
 
-def generate_converter(provider: Provider, path: Path, *,
+def generate_converter(provider: Provider, path, *,
                        system_prompt: str, validate,
+                       context: str = "",
                        max_attempts: int = MAX_ATTEMPTS
                        ) -> Tuple[AdapterRecord, list, str]:
     """The generic generate → sandbox → validate → retry loop.
 
     ``validate(stdout, file_ref) -> list`` is the caller's Wall-2 contract;
-    different converters (source-string ingest, glossary review sheets, …)
+    different converters (source-string ingest, translation pairs, …)
     supply their own system prompt and validator.
+
+    ``path`` is one file or a sequence of them. Several exist because the
+    converter often has to see more than one to do its job — a per-locale
+    export keeps the source text and the translation in separate files,
+    and an adapter shown one at a time cannot pair them no matter how
+    capable the model is. ``context`` carries what the filenames alone do
+    not say: which language is the source, which target is wanted.
     """
-    raw = Path(path).read_bytes()
-    sample = _sample_of(Path(path), raw)
+    paths = ([Path(path)] if isinstance(path, (str, Path))
+             else [Path(p) for p in path])
+    primary = paths[0]
+    raw = primary.read_bytes()
+    if len(paths) == 1:
+        sample = _sample_of(primary, raw)
+    else:
+        # Every file gets a sample, labelled with its real name and its
+        # argv position — the name is usually what identifies the locale
+        # ("Game_ja.xlsx"), and the position is how the script reaches it.
+        sample = "\n\n".join(
+            f"=== argv[{index + 1}] — {each.name} ===\n"
+            + _sample_of(each, each.read_bytes())
+            for index, each in enumerate(paths))
     script: Optional[str] = None
     error: Optional[str] = None
     fingerprint = ""
     for attempt in range(1, max_attempts + 1):
         script, fingerprint = _write_converter(
-            provider, system_prompt, Path(path).suffix, sample, script, error)
-        result = run_sandboxed(script, path)
+            provider, system_prompt, primary.suffix, sample, script, error,
+            context=context)
+        result = run_sandboxed(script, paths)
         if not result.ok:
             error = (f"exit code {result.returncode}"
                      f"{' (timeout)' if result.timed_out else ''}; "
                      f"stderr: {result.stderr[:800]}")
             continue
         try:
-            records = validate(result.stdout, str(path))
+            records = validate(result.stdout, str(primary))
         except ValueError as err:
             error = f"output validation failed: {err}"
             continue
         record = AdapterRecord(
-            suffix=Path(path).suffix, script=script, attempts=attempt,
+            suffix=primary.suffix, script=script, attempts=attempt,
             sample_sha256=hashlib.sha256(raw).hexdigest(),
             record_count=len(records))
         return record, records, fingerprint
     raise RuntimeError(
         f"adapter generation failed after {max_attempts} attempts for "
-        f"{path}; last error: {error}")
+        f"{', '.join(p.name for p in paths)}; last error: {error}")
 
 
-def run_adapter(script: str, path: Path, validate=None):
+def run_adapter(script: str, path, validate=None):
     """Re-run a STORED adapter (INCREMENTAL path).
 
     `validate` selects the contract: the default ingest one ({key, text}),
@@ -202,7 +239,21 @@ BILINGUAL_SYSTEM = (
     "- Python 3 STDLIB ONLY (no pip installs; the sandbox has no network "
     "and no site-packages). For .xlsx, unzip it and parse the XML with "
     "zipfile + xml.etree — openpyxl is NOT available.\n"
-    "- The script receives the input file path as sys.argv[1].\n"
+    "- The script receives ONE OR MORE input file paths as sys.argv[1:], "
+    "in the order shown to you. Read ALL of them.\n"
+    "- TWO LAYOUTS EXIST, and you must tell them apart from the samples:\n"
+    "  (a) ONE file holding both languages in different COLUMNS — take "
+    "the source column and the target column from the same row.\n"
+    "  (b) SEPARATE files per language (a source export plus a "
+    "per-locale export, e.g. 'Game (Source).xlsx' + 'Game_ja.xlsx') — "
+    "each file holds ONE language, so read the source text from the "
+    "source file, the translation from the target file, and JOIN them on "
+    "the shared key column. Emitting a single file's text as `source` "
+    "with an empty `target` is WRONG in this layout: it produces rows "
+    "that look valid and contain nothing to review.\n"
+    "- If a key exists in the source but not the target, emit it with an "
+    "empty target — an untranslated string is a finding, not a row to "
+    "drop.\n"
     "- It must print to STDOUT one JSON array of objects, each exactly "
     '{"key": "<id>", "source": "<source-language text>", '
     '"target": "<translated text>"} — nothing else on stdout.\n'
@@ -256,7 +307,8 @@ def validate_pairs(stdout: str, file_ref: str) -> List[tuple]:
     return pairs
 
 
-def generate_bilingual_adapter(provider: Provider, path: Path):
+def generate_bilingual_adapter(provider: Provider, path, *,
+                               context: str = ""):
     """Adapter that extracts (key, source, target) pairs from any format.
 
     The source path has had this since the Adapter-Writer existed; the
@@ -266,4 +318,4 @@ def generate_bilingual_adapter(provider: Provider, path: Path):
     """
     return generate_converter(provider, path,
                               system_prompt=BILINGUAL_SYSTEM,
-                              validate=validate_pairs)
+                              validate=validate_pairs, context=context)

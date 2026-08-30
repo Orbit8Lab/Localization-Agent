@@ -54,20 +54,43 @@ def _child_limits() -> None:
             pass
 
 
-def run_sandboxed(script: str, input_file: Path, *,
+def run_sandboxed(script: str, input_file, *,
                   timeout: float = 15.0) -> SandboxResult:
-    """Run ``script`` against a copy of ``input_file`` in a scratch dir.
-    The script receives the copied file path as argv[1] and must print its
-    result to stdout. Nothing else it does is trusted or kept."""
+    """Run ``script`` against a copy of the input file(s) in a scratch dir.
+
+    ``input_file`` is one path or a sequence of them; the copies are passed
+    as argv[1:] in the order given. Nothing else the script does is trusted
+    or kept.
+
+    Multiple inputs exist because a converter frequently needs to SEE more
+    than one file to do its job: game exports commonly ship one file per
+    locale, so the source text and the translation live apart and neither
+    file is bilingual on its own. Handing the adapter one file at a time
+    made that layout unreadable — it could only ever find a source with no
+    target, and produced correctly-shaped, entirely useless output.
+
+    Every wall is unchanged: separate ``python -I -S`` process, empty env,
+    POSIX rlimits, scratch copies, and only stdout crossing back.
+    """
+    files = ([input_file] if isinstance(input_file, (str, Path))
+             else list(input_file))
+    if not files:
+        raise ValueError("no input file given")
     with tempfile.TemporaryDirectory(prefix="orbit8-sbx-") as scratch:
         scratch_dir = Path(scratch)
-        target = scratch_dir / f"input{Path(input_file).suffix or '.dat'}"
-        shutil.copyfile(input_file, target)
+        names = []
+        for index, source in enumerate(files):
+            # Numbered copies: the real names may collide, contain spaces,
+            # or leak a client path into the sandbox.
+            target = scratch_dir / (
+                f"input{index}{Path(source).suffix or '.dat'}")
+            shutil.copyfile(source, target)
+            names.append(target.name)
         adapter = scratch_dir / "adapter.py"
         adapter.write_text(script, encoding="utf-8")
         try:
             proc = subprocess.run(
-                [sys.executable, "-I", "-S", str(adapter), target.name],
+                [sys.executable, "-I", "-S", str(adapter), *names],
                 cwd=scratch_dir,
                 env={},                       # no keys, no proxies, no HOME
                 capture_output=True,

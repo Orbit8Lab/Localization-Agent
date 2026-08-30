@@ -90,9 +90,11 @@ def test_a_non_po_goes_through_the_fallback(tmp_path):
     csv.write_text("Key,English,Chinese\nA,Start,开始\nB,Quit,退出\n",
                    encoding="utf-8")
 
-    def fake_adapter(path):
-        return [("A", "Start", "开始", str(path)),
-                ("B", "Quit", "退出", str(path))]
+    def fake_adapter(paths, *, context=""):
+        assert isinstance(paths, list)      # the WHOLE set, not one file
+        assert "en" in context and "zh-CN" in context
+        return [("A", "Start", "开始", str(paths[0])),
+                ("B", "Quit", "退出", str(paths[0]))]
 
     written, empty = emit_bilingual_jsonl(
         [csv], tmp_path / "out.jsonl", source_lang="en",
@@ -105,18 +107,69 @@ def test_a_non_po_goes_through_the_fallback(tmp_path):
     assert rows[0]["target_text"] == "开始"
 
 
-def test_an_empty_target_survives_the_fallback(tmp_path):
+def test_an_untranslated_row_survives_alongside_translated_ones(tmp_path):
     """An untranslated string is exactly what a review must flag —
     dropping it at export is a recall hole, and that rule has to hold on
     the adapter path too."""
     csv = tmp_path / "pairs.csv"
-    csv.write_text("Key,English,Chinese\nA,Start,\n", encoding="utf-8")
+    csv.write_text("Key,English,Chinese\nA,Start,开始\nB,Quit,\n",
+                   encoding="utf-8")
 
     written, empty = emit_bilingual_jsonl(
         [csv], tmp_path / "out.jsonl", source_lang="en",
         target_lang="zh-CN",
-        fallback=lambda p: [("A", "Start", "", str(p))])
-    assert written == 1 and empty == 1
+        fallback=lambda p, *, context="": [
+            ("A", "Start", "开始", str(p[0])),
+            ("B", "Quit", "", str(p[0]))])
+    assert written == 2 and empty == 1
+
+
+def test_an_export_with_NO_translations_is_refused(tmp_path):
+    """The bug that produced 400 unusable rows: a per-locale file holds
+    ONE language, so an adapter shown it alone emits that language as
+    `source` with every target empty. Correctly shaped, nothing to
+    review, and silent — an LQA run would have found no defects because
+    there was no translation to inspect."""
+    csv = tmp_path / "ja_only.csv"
+    csv.write_text("Key,Japanese\nA,ゲーム開始\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as excinfo:
+        emit_bilingual_jsonl(
+            [csv], tmp_path / "out.jsonl", source_lang="en",
+            target_lang="ja",
+            fallback=lambda p, *, context="": [
+                (f"K{n}", "ゲーム開始", "", str(p[0])) for n in range(5)])
+    message = str(excinfo.value)
+    assert "empty target" in message
+    assert "pass BOTH" in message           # and how to fix it
+
+
+def test_two_files_are_handed_to_the_adapter_together(tmp_path):
+    """THE fix. A per-locale layout is only legible when the adapter sees
+    the source export and the target export at once — shown one at a
+    time it can find a source with no target and nothing else."""
+    source = tmp_path / "Game (Source).xlsx"
+    target = tmp_path / "Game_ja.xlsx"
+    for path in (source, target):
+        path.write_bytes(b"PK\x03\x04stub")
+
+    seen = {}
+
+    def adapter(paths, *, context=""):
+        seen["files"] = [p.name for p in paths]
+        seen["context"] = context
+        return [("A", "Start Game", "ゲーム開始", str(paths[0]))]
+
+    written, _empty = emit_bilingual_jsonl(
+        [source, target], tmp_path / "out.jsonl", source_lang="en",
+        target_lang="ja", fallback=adapter)
+
+    assert written == 1
+    assert seen["files"] == ["Game (Source).xlsx", "Game_ja.xlsx"]
+    # the context names the languages AND the argv positions, which is
+    # what lets the adapter tell which file holds which language
+    assert "en → ja" in seen["context"]
+    assert "argv[1]=Game (Source).xlsx" in seen["context"]
 
 
 def test_a_source_language_file_is_still_refused(tmp_path):
@@ -129,8 +182,8 @@ def test_a_source_language_file_is_still_refused(tmp_path):
         emit_bilingual_jsonl(
             [csv], tmp_path / "out.jsonl", source_lang="en",
             target_lang="zh-CN",
-            fallback=lambda p: [(f"K{n}", "Start", "Start", str(p))
-                                for n in range(10)])
+            fallback=lambda p, *, context="": [
+                (f"K{n}", "Start", "Start", str(p[0])) for n in range(10)])
     assert "source-language file" in str(excinfo.value)
 
 
