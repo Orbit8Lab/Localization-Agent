@@ -870,3 +870,67 @@ def test_a_second_failure_still_propagates(tmp_path):
             fallback=lambda p, *, context="", cache_key="",
             regenerate=False: [("Barrier", "屏障", "屏障", str(p[0]))])
     assert "did not use the requested columns" in str(excinfo.value)
+
+
+def test_the_agent_can_build_a_termbase_from_a_publisher_sheet(tmp_path):
+    """A publisher-supplied glossary is neither corpus-mined nor
+    PE-derived — it is authoritative on arrival. Without this tool the
+    agent could only offer those two paths and correctly reported it had
+    no way to do what was asked."""
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+
+    project = tmp_path / "proj"
+    received = project / "10-received"
+    received.mkdir(parents=True)
+    pytest.importorskip("openpyxl")
+    import openpyxl
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["English", "日本語"])
+    sheet.append(["Barrier", "バリア"])
+    book.save(received / "terms.xlsx")
+
+    job = Job.init(project / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    chat = ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+    result = json.loads(chat._t_glossary_from_sheet({
+        "sheet": "10-received/terms.xlsx", "source_column": "English",
+        "target_column": "日本語", "locale": "ja", "lock": True}))
+
+    assert result["status"] == "complete" and result["locked"]
+    payload = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+    assert payload["terms"]["Barrier"]["translation"] == "バリア"
+    assert payload["terms"]["Barrier"]["locked"]
+
+
+def test_the_agent_warns_when_terms_are_not_locked(tmp_path):
+    """Advisory terms mean the gate finds no terminology defects — which
+    reads as a clean result rather than a check that never ran."""
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+
+    project = tmp_path / "proj"
+    received = project / "10-received"
+    received.mkdir(parents=True)
+    pytest.importorskip("openpyxl")
+    import openpyxl
+    book = openpyxl.Workbook()
+    book.active.append(["English", "日本語"])
+    book.active.append(["Barrier", "バリア"])
+    book.save(received / "t.xlsx")
+
+    job = Job.init(project / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    chat = ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+    result = json.loads(chat._t_glossary_from_sheet({
+        "sheet": "10-received/t.xlsx", "source_column": "English",
+        "target_column": "日本語", "locale": "ja"}))
+    assert not result["locked"]
+    assert "ADVISORY" in result["next"]

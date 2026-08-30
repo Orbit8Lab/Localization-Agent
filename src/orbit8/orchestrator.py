@@ -217,6 +217,15 @@ DeepSeek. Outputs a stream-patched copy (untouched entries \
 byte-identical), the standard MTPE form for post-editing, and a report. \
 This is a WORK PRODUCT, not a delivery — deliveries go through \
 deliver_po after post-editing.
+- {"tool": "glossary_from_sheet", "args": {"sheet": "<term sheet>", \
+"source_column": "<header>", "target_column": "<header>", "locale": \
+"<locale>", "lock": false, "out_dir": "<optional>"}} — a client TERM \
+SHEET → the T1 termbase the deterministic gate enforces. This is NOT a \
+conversion of bilingual_jsonl: a JSONL row is a translation to be \
+CHECKED, a termbase entry is a term that is LAW. Run it once per locale. \
+"lock" defaults to false — an unratified client sheet enforced as law \
+reports correct translations as defects, so ASK the operator before \
+locking.
 - {"tool": "lqa_run", "args": {"pairs": "<bilingual .jsonl>", "locale": \
 "<target locale>", "name": "<audit name>", "deterministic_only": false}} \
 — audit a bilingual JSONL through the tier cascade (T1 mechanical → T2 \
@@ -912,6 +921,83 @@ class ChatOrchestrator:
              "mtpe_form": str(Path(str(args.get("out_dir", "")))
                               / "mtpe_form.xlsx")}, ensure_ascii=False)
 
+    def _t_glossary_from_sheet(self, args: dict) -> str:
+        """A client term sheet → the T1 termbase the deterministic gate reads.
+
+        NOT a conversion of `bilingual_jsonl`. Those two artifacts carry
+        different things: a JSONL row is a translation to be CHECKED, a
+        termbase entry is a term that is LAW, with `locked`, `tier`,
+        `forms` and provenance. Deriving a termbase from pairs would
+        produce entries with none of that — a glossary where nothing is
+        enforceable. The sheet still has the information; the JSONL has
+        already discarded it, so this reads the sheet.
+        """
+        from datetime import date
+
+        from .glossary_import import emit_rag_json
+
+        sheet = self._confine_read(str(args.get("sheet", "")))
+        if not sheet.exists():
+            return f"error: no such file: {sheet}"
+        table = self._read_table(sheet)
+        if table is None:
+            return (f"error: could not read {sheet.name} as a spreadsheet "
+                    f"(need .xlsx/.xlsm/.csv/.tsv)")
+        header, rows = table
+        source_column = str(args.get("source_column", ""))
+        target_column = str(args.get("target_column", ""))
+        for column in (source_column, target_column):
+            if column not in header:
+                return (f"error: column {column!r} not found; headers are "
+                        f"{header}")
+        locale = str(args.get("locale", ""))
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        if locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+
+        source_index = header.index(source_column)
+        target_index = header.index(target_column)
+        # Locked is OFF unless asked for: a client sheet is a proposal
+        # until a human ratifies it, and unratified terms enforced as law
+        # report correct translations as defects.
+        lock = bool(args.get("lock"))
+        terms, skipped = {}, 0
+        for row in rows:
+            if len(row) <= max(source_index, target_index):
+                skipped += 1
+                continue
+            term = str(row[source_index]).strip()
+            rendering = str(row[target_index]).strip()
+            if not term or not rendering:
+                skipped += 1
+                continue
+            terms[term] = {
+                "translation": rendering, "type": "other", "tier": 1,
+                "locked": lock,
+                "source": f"client term sheet {sheet.name} "
+                          f"({date.today().isoformat()})"}
+        if not terms:
+            return f"error: no usable rows in {sheet.name}"
+
+        out_dir = (self._confine(str(args["out_dir"])) if args.get("out_dir")
+                   else self.project_root / "40-reference" / "glossary")
+        out = out_dir / f"glossary_terms.{locale}.json"
+        emit_rag_json(terms, out, game=intake.game, locale=locale,
+                      source_lang=intake.source_lang)
+        return json.dumps({
+            "status": "complete", "terms": len(terms), "skipped": skipped,
+            "locked": lock, "path": str(out),
+            "next": (
+                "This termbase is written. "
+                + ("Terms are ADVISORY (locked=false) — the gate will not "
+                   "enforce them. Ask the operator whether to lock them "
+                   "before relying on terminology findings."
+                   if not lock else
+                   "Terms are LOCKED and the gate enforces them.")
+                + " Promote it with `orbit8 glossary promote` to make it "
+                  "the project's active termbase.")}, ensure_ascii=False)
+
     def _t_lqa_run(self, args: dict) -> str:
         """Audit a bilingual JSONL through the full tier cascade.
 
@@ -1143,7 +1229,9 @@ class ChatOrchestrator:
                 "add_glossary_terms": self._t_add_glossary_terms,
                 "translate_po": self._t_translate_po,
                 "scan_po": self._t_scan_po,
-                "lqa_run": self._t_lqa_run}
+                "lqa_run": self._t_lqa_run,
+                "glossary_from_sheet":
+                    self._t_glossary_from_sheet}
 
     @classmethod
     def tool_names(cls) -> frozenset:
