@@ -28,7 +28,8 @@ def source(tmp_path) -> list:
 
 
 def _proposal(**kw) -> IntakeProposal:
-    base = dict(job_id="nomori-en-ja", game="Nomori", source_lang="zh-CN",
+    base = dict(job_id="examplegame-en-ja", game="ExampleGame",
+                source_lang="zh-CN",
                 target_locales=["en", "ja"], genre=["survival"],
                 client_lang="zh-CN", engine="unity")
     base.update(kw)
@@ -106,9 +107,15 @@ def test_a_missing_source_file_is_caught(source):
     assert any("not found" in message for message in result.errors)
 
 
-def test_no_source_files_is_an_error():
-    """S1 would have nothing to ingest."""
-    assert not review(_proposal(), []).ok
+def test_no_source_file_warns_but_does_not_block():
+    """A job with no strings yet is legitimate: it sits at INTAKE/G0, and
+    only S1 (INGEST) needs the source — which is the right place to stop.
+    Blocking here would prevent setting a project up before the client's
+    drop arrives, which is exactly when a project folder gets created."""
+    result = review(_proposal(), [])
+    assert result.ok
+    assert any("no source file yet" in message
+               for message in result.warnings)
 
 
 # ------------------------------------------------- warnings, not errors

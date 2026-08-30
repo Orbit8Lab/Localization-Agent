@@ -40,6 +40,51 @@ def _json_source(directory: Path, name: str, count: int = 3) -> Path:
     return path
 
 
+# ------------------------------------------------------------ scaffolding
+
+def test_the_standard_structure_is_created(tmp_path):
+    """A project folder is routinely made before there is anything to put
+    in it — the client is signed, the folder exists, the strings arrive a
+    week later. Requiring the layout to pre-exist made the tool useless at
+    exactly that moment."""
+    from orbit8.project_paths import scaffold_project
+
+    created = scaffold_project(tmp_path)
+    assert set(created) == {"10-received", "20-work", "30-deliverables",
+                            "40-reference"}
+    for name in created:
+        assert (tmp_path / name).is_dir()
+
+
+def test_scaffolding_only_adds(tmp_path):
+    """Existing directories are left alone — this must never reshape
+    someone's folder, only fill in what is missing."""
+    from orbit8.project_paths import scaffold_project
+
+    (tmp_path / "10-received").mkdir()
+    (tmp_path / "10-received" / "keep.po").write_text("x", encoding="utf-8")
+
+    created = scaffold_project(tmp_path)
+    assert "10-received" not in created
+    assert (tmp_path / "10-received" / "keep.po").exists()
+
+
+def test_scaffolding_is_idempotent(tmp_path):
+    from orbit8.project_paths import scaffold_project
+
+    scaffold_project(tmp_path)
+    assert scaffold_project(tmp_path) == []
+
+
+def test_a_scaffolded_folder_is_recognised_as_a_project(tmp_path):
+    """The point of scaffolding: discovery works afterwards."""
+    from orbit8.project_paths import scaffold_project
+
+    scaffold_project(tmp_path)
+    _json_source(tmp_path / "10-received", "Strings.json")
+    assert discover_sources(tmp_path).found
+
+
 # --------------------------------------------------------- the happy path
 
 def test_a_single_source_is_found(tmp_path):

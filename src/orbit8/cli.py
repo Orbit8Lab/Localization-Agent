@@ -44,6 +44,13 @@ def _cmd_init(args) -> int:
         reference_titles=(args.references.split(",")
                           if args.references else []),
         tenant_id=args.tenant)
+    # Co-locating two organizations under one jobs root defeats the file
+    # boundary: they share a project folder, and the file tools treat that
+    # folder as home ground for both.
+    from .tenancy import mixed_tenant_warning
+    warning = mixed_tenant_warning(Path(args.root), intake.tenant_id)
+    if warning:
+        print(warning, file=sys.stderr)
     job = Job.init(Path(args.root), args.job_id, intake=intake,
                    source_files=args.source, pilot_size=args.pilot_size,
                    tester_hours=args.tester_hours)
@@ -998,9 +1005,20 @@ def _cmd_new(args) -> int:
     """
     from .intake_wizard import propose_intake, render, review, to_intake
 
-    from .project_paths import discover_sources
+    from .project_paths import discover_sources, scaffold_project
 
     root = Path(args.root)
+    if not root.exists():
+        root.mkdir(parents=True)
+        print(f"created {root}")
+    # A project folder is routinely made before there is anything in it —
+    # the client is signed, the folder exists, the strings arrive later.
+    # Scaffolding here means `orbit8 new` works at that moment instead of
+    # demanding a layout the operator has not built yet.
+    created = scaffold_project(root)
+    if created:
+        print(f"created project structure: {', '.join(created)}")
+
     sources = list(args.source or ())
     if not sources:
         # Discovery, not guessing: look under the project's 10-received/
@@ -1009,9 +1027,13 @@ def _cmd_new(args) -> int:
         # ingesting last month's drop builds a job that looks correct and
         # translates the wrong text.
         found = discover_sources(root)
-        for note in found.notes:
-            print(f"  {note}")
+        # Only worth saying when something WAS found but partly skipped.
+        # On a fresh project "no .json or .po files under 10-received/" is
+        # the expected state, not a problem, and printing it before the
+        # friendlier explanation below reads like an error.
         if found.found:
+            for note in found.notes:
+                print(f"  {note}", file=sys.stderr)
             print(f"\nSource files under {found.project_root}:")
             for index, candidate in enumerate(found.candidates, 1):
                 print(f"  {index}. {candidate.describe()}")
@@ -1025,10 +1047,19 @@ def _cmd_new(args) -> int:
                     found.candidates):
                 sources = [str(found.candidates[int(answer) - 1].path)]
         if not sources:
-            print("\nNo source chosen. Pass one explicitly:\n"
-                  "  uv run orbit8 new <root> --source <file>",
-                  file=sys.stderr)
-            return 2
+            # No source is a VALID state, not a failure. The job sits at
+            # INTAKE/G0 perfectly well; only S1 (INGEST) needs the
+            # strings, which is exactly where a missing source should
+            # stop things. Refusing here would block the common case of
+            # setting a project up before the drop arrives.
+            print(f"\nNo source file yet — the job will be created and wait "
+                  f"at INTAKE.\nDrop the strings into "
+                  f"{root.name}/10-received/ and re-run "
+                  f"`orbit8 next` when they arrive.")
+            if input("Continue without a source? [Y/n] ").strip().lower() \
+                    not in ("", "y", "yes"):
+                print("cancelled")
+                return 1
 
     description = args.describe or input(
         "Describe the project (game, source language, target locales, "

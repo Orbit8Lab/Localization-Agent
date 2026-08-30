@@ -265,6 +265,27 @@ def _count_entries(path: Path) -> Tuple[int, str]:
     return 0, "unsupported format"
 
 
+def scaffold_project(root: Path) -> List[str]:
+    """Create the standard workspace directories under `root`.
+
+    Returns the names actually created, so the caller can report what
+    changed rather than silently reshaping someone's folder. Existing
+    directories are left alone — this only ever adds.
+
+    A project folder is often made before there is anything to put in it:
+    the client is signed, the folder exists in Drive, and the strings
+    arrive a week later. Requiring the layout to pre-exist made the tool
+    useless at exactly that moment.
+    """
+    created = []
+    for name in (RECEIVED_DIR, WORK_DIR, "30-deliverables", REFERENCE_DIR):
+        path = Path(root) / name
+        if not path.exists():
+            path.mkdir(parents=True)
+            created.append(name)
+    return created
+
+
 def discover_sources(start: Path, *,
                      project_root: Optional[Path] = None) -> SourceDiscovery:
     """Find likely source files for a new job under a project workspace.

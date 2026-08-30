@@ -145,8 +145,13 @@ def review(proposal: IntakeProposal,
                       f"name (lowercase, digits, . _ -)")
 
     if not source_files:
-        errors.append("no source files given — S1 would have nothing to "
-                      "ingest")
+        # A warning, not an error. The job is legitimate without strings —
+        # it sits at INTAKE/G0 and only S1 (INGEST) needs them, which is
+        # the right place to stop. Blocking here would prevent setting a
+        # project up before the client's drop arrives, which is when a
+        # project folder is usually created.
+        warnings.append("no source file yet — the job will wait at INTAKE "
+                        "until strings are added to 10-received/")
     for path in source_files:
         if not Path(path).exists():
             errors.append(f"source file not found: {path}")

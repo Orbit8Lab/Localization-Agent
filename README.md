@@ -142,17 +142,130 @@ argued about.
 
 ![Glossary and PE flywheel](docs/image/glossary-pe-loop.svg)
 
-## Skill docs
+## Skill docs — playbooks loaded at runtime
 
-Policies that shape agent behavior live as skill documents under
-`docs/skills/` — the source of truth the code implements (same pattern as
-localization-pipeline's `docs/agents/`):
+Policies that shape agent behavior live under
+[`docs/skills/`](docs/skills/README.md). One playbook per lifecycle phase,
+selected by what the **Controller derives** — routing is a lookup on
+`(phase, gate)`, never an inference from the operator's phrasing, so an
+agent cannot talk its way into another stage's guidance.
 
-- [`lqa-batch-split.md`](docs/skills/lqa-batch-split.md) — story vs
-  pure-string classification and the Tier-3 batch policy (story n=5,
-  strings n=20). Implemented by `external_lqa.py` + `graphs/lqa.py`;
-  invoked as `orbit8 lqa run <root> <job> --pairs <bilingual.jsonl>` to
-  audit external (developer) translations through the tier cascade.
+Each doc declares the tools it uses in frontmatter, and the loader
+validates every name against the orchestrator's live registry. A doc naming
+a tool that does not exist **fails to load** rather than degrading: design
+§7 again — a playbook may select and sequence existing tools, never invent
+capability.
+
+```
+docs/skills/
+  README.md              router: (phase, gate) → playbook
+  lifecycle/             intake · ingest · context · asset · pilot
+                         production · lqa · flagged · testing · release
+  operations/            po-roundtrip · glossary-update
+  lqa-batch-split.md     policy spec (story n=5, strings n=20)
+```
+
+`lqa-batch-split.md` is a spec the code implements rather than a playbook,
+and a test pins `LQAConfig` to the numbers it states — which is how a
+silent drift got caught: the doc said Tier-3 string batches of 20 while the
+main pipeline ran 10.
+
+## Starting a new project
+
+### What you need first
+
+**The game's source strings.** The pipeline translates existing text; it
+does not author it. S1 ingests two formats natively:
+
+- **flat JSON** — `{key: source text}`, not nested:
+  `{"UI_START": "开始游戏", "ITEM_AXE": "石斧：采集效率+15%"}`
+- **`.po`** — gettext/Unreal export, `msgctxt` as key, `msgid` as source
+
+Anything else (xlsx, csv, a custom format) goes through the Adapter-Writer:
+the agent sees a 4KB sample, writes a converter, and it runs sandboxed —
+see [Sandbox](#sandbox-agent-generated-ingest-adapters).
+
+Nothing else needs to exist. `job init` creates the whole job tree.
+
+### The three ways in
+
+```bash
+# 1. Conversational — describe it, confirm, done
+uv run orbit8 new /path/to/example-project
+```
+
+Finds the source under `10-received/` itself, asks you to describe the
+project, and shows the proposed intake for confirmation **before writing
+anything**:
+
+```
+Source files under /path/to/example-project:
+  1. Strings.json (412 strings)  in 10-received/20260828-drop
+Use this source? [Y/n]
+
+  job id        examplegame-en-ja
+  game          ExampleGame
+  source lang   zh-CN
+  targets       en, ja
+  genre         survival
+  engine        unknown
+  client lang   (none)
+  platforms     (none)
+  sources       10-received/20260828-drop/Strings.json
+  warning no client_lang — bug reports default to the target language,
+          which the client may not read
+
+Create this job? [y/N/edit]
+```
+
+Every field is shown including the empty ones — an omission is a decision
+too, and the failure mode is confirming a form whose blank `client_lang`
+you never noticed. `edit` re-proposes from a correction in words
+("targets should also include Korean").
+
+The model **proposes**; a deterministic check **validates**; you **commit**.
+The intake form is the job's constitution — `source_lang` and
+`target_locales` decide what every later stage does — so the model's role
+stops at proposing. Validation catches what a model gets confidently wrong:
+`jp` for `ja`, a source language listed as its own target, an unsafe
+`job_id`, a `.po` whose `msgstr` is already filled (a target, not a source).
+
+`--describe` skips the prompt; `--source` overrides discovery. Needs an API
+key.
+
+```bash
+# 2. Explicit — every field on the command line, no API key
+uv run orbit8 job init jobs demo-ko --game ExampleGame \
+    --source strings.json --source-lang zh --targets ko --genre werewolf
+
+# 3. Don't know what's already here?
+uv run orbit8 job list jobs
+```
+
+```
+job                     phase         gate  next
+------------------------------------------------------------------------
+client-multi            INTAKE        -     run market analysis
+demo-ko                 ASSET         -     glossary health check [ko]
+```
+
+### Where files live
+
+The chat file tools are confined to **the parent of the jobs root** — a
+tool boundary, not a prompt rule. A project workspace looks like:
+
+```
+example-project/            ← chat file tools confined here
+├── 10-received/            ← client drops; `orbit8 new` searches here
+│   └── 20260828-drop/
+├── 20-work/
+├── 30-deliverables/
+├── 40-reference/           ← promoted glossary + style guides
+└── jobs/                   ← created by job init / orbit8 new
+```
+
+Running the job root inside the project folder keeps one client's assets
+reachable and every other client's out of reach.
 
 ## Usage
 
@@ -170,10 +283,13 @@ uv run orbit8 status jobs demo-ko
 # $DEEPSEEK_API (auto-loaded from .ENV outside the repo, or $ORBIT8_ENV)
 uv run orbit8 next jobs demo-ko
 
-uv run pytest    # 284 tests incl. full INTAKE→RELEASE dry-run, sandbox,
-                 # codegen retry loop, chat orchestrator, .po format
-                 # fidelity and display-width budgets
+uv run pytest    # 565 tests incl. full INTAKE→RELEASE dry-run, sandbox,
+                 # codegen retry loop, chat orchestrator, context assembly,
+                 # .po format fidelity and display-width budgets
 ```
+
+`--dry-run` needs no API key at all, so the whole Controller / gate /
+artifact model is explorable before any spend.
 
 ## v0 simplifications (deliberate, documented)
 
