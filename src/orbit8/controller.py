@@ -38,8 +38,8 @@ from .observation import (ACCEPTED, FIRST, G3_ACCEPTED, G3_EDITED,
                           ObservationLog)
 from .schemas import (DomainLabels, GlossaryDelta, HealthReport, IngestReport,
                       IntakeBrief, LQAReport, MarketReport, MTPEQueue,
-                      SourceBatch, StyleBrief, TestPlan, TranslateRunSummary,
-                      UniqueString)
+                      SmokeResult, SourceBatch, StyleBrief, TestPlan,
+                      TranslateRunSummary, UniqueString)
 from .store import ArtifactError, JobStore
 
 GATES = [("G0", "scope sign-off"), ("G1", "asset lock"),
@@ -209,6 +209,162 @@ class Job:
         provider = self._provider(stage, provider_factory, dry_run)
         handler(stage, provider, dry_run)
         return stage
+
+    def smoke(self, provider_factory: Optional[ProviderFactory] = None,
+              *, size: int = 5,
+              locales: Optional[List[str]] = None) -> List[SmokeResult]:
+        """Pre-flight: run the REAL model on a few strings per locale and
+        report what the batch would do, without touching the job.
+
+        `dry_run` already existed and does not answer this question: it
+        swaps in `EchoProvider`, so it exercises the plumbing and never
+        sends a prompt. Every wrong-configuration bug this repo has hit
+        was invisible to it — most recently an audit that reviewed
+        Japanese under Simplified Chinese rules, because the locale was
+        resolved from the intake order rather than the input. A batch of
+        400 strings then returns 400 confident findings, which reads like
+        a quality catastrophe rather than a config error.
+
+        So the contract is: real provider, tiny sample, nothing written.
+        Three properties make it safe to run at any time —
+
+        1. A THROWAWAY RunDB seeded with copies of the segments. The live
+           run DB is never opened for writing, so a smoke run cannot mark
+           pending strings accepted and quietly shrink the real batch.
+        2. No `store.write`, so no artifact can satisfy a `derive()`
+           check. A smoke run can never advance the job's stage.
+        3. Failures are captured per locale, not raised. One locale with a
+           bad glossary must not hide the verdict on the other three —
+           which is the whole reason to smoke-test a multi-locale batch.
+
+        Returns one result per locale; check `.ok` and read `.samples`.
+        """
+        intake = self._intake()
+        wanted = locales or intake.target_locales
+        unknown = [l for l in wanted if l not in intake.target_locales]
+        if unknown:
+            raise ValueError(
+                f"not target locales of this job: {', '.join(unknown)} "
+                f"(configured: {', '.join(intake.target_locales)})")
+        return [self._smoke_locale(locale, provider_factory, size)
+                for locale in wanted]
+
+    def _smoke_locale(self, locale: str,
+                      provider_factory: Optional[ProviderFactory],
+                      size: int) -> SmokeResult:
+        """One locale's pre-flight. Never raises — the error rides in the
+        result so the remaining locales still get checked."""
+        import time
+
+        glossary = self._glossary(locale)
+        # Report the glossary as the batch will see it, including "none".
+        # An empty termbase makes "no terminology findings" meaningless,
+        # and that ambiguity is exactly what a pre-flight exists to kill.
+        result = SmokeResult(
+            locale=locale, kind="translate", sampled=0, pending_total=0,
+            ok=False, source_lang=self._intake().source_lang,
+            target_lang=locale,
+            glossary_terms=len(glossary.locked_map()) if glossary else 0,
+            glossary_source=(f"t1:{glossary.game}" if glossary else "none"),
+            style_brief=self._style_or_none() is not None)
+        try:
+            live = self._run_db(locale)
+            refs = live.refs("pending")
+            result.pending_total = len(refs)
+            if not refs:
+                result.warnings.append(
+                    f"no pending segments for {locale} — nothing a batch "
+                    f"would translate; run INGEST first")
+                result.ok = True
+                return result
+
+            provider = (EchoProvider(locale) if provider_factory is None
+                        else provider_factory(locale))
+            result.provider = type(provider).__name__
+            result.model = str(getattr(provider, "model", "") or "")
+            if provider_factory is None:
+                result.warnings.append(
+                    "no provider factory: ran against EchoProvider, so "
+                    "this proves the plumbing and NOT the prompts")
+
+            sample = refs[:max(1, size)]
+            scratch = self._smoke_db(locale, live, sample)
+            started = time.monotonic()
+            summary = self._smoke_translate(
+                locale, provider, glossary, scratch,
+                live=provider_factory is not None)
+            result.elapsed_s = round(time.monotonic() - started, 2)
+            result.sampled = len(sample)
+            result.tokens_spent = summary.tokens_spent
+            result.samples = [
+                {"uid": row["uid"], "source": row["text"],
+                 "target": row["target"] or "", "status": row["status"]}
+                for row in scratch.all_segments()][:size]
+            # An empty target from a real provider is a failure even when
+            # the graph reports success: it means the batch would ship
+            # blanks.
+            blank = [x for x in result.samples if not x["target"].strip()]
+            if blank and provider_factory is not None:
+                result.warnings.append(
+                    f"{len(blank)} of {len(result.samples)} sampled "
+                    f"strings came back empty")
+            result.ok = not blank or provider_factory is None
+        except Exception as err:                # per-locale isolation
+            result.error = f"{type(err).__name__}: {err}"
+            result.ok = False
+        return result
+
+    def _smoke_db(self, locale: str, live: RunDB,
+                  sample: List) -> RunDB:
+        """A disposable RunDB holding copies of the sampled segments.
+
+        The sample is COPIED rather than shared: `run_translate_stage`
+        marks what it translates, and doing that to the live DB would
+        consume the very strings the operator is about to batch.
+        """
+        path = self.store.smoke_db_path(locale)
+        if path.exists():
+            path.unlink()                      # each smoke run starts clean
+        scratch = RunDB(path)
+        uids = {ref.uid for ref in sample}
+        scratch.seed([UniqueString(uid=row["uid"], text=row["text"],
+                                   keys=list(row["keys"]))
+                      for row in live.by_status("pending")
+                      if row["uid"] in uids])
+        return scratch
+
+    def _smoke_translate(self, locale: str, provider: Provider,
+                         glossary: Optional[Glossary], scratch: RunDB,
+                         *, live: bool) -> "TranslateRunSummary":
+        """The production translate path, pointed at the scratch DB.
+
+        Config mirrors PRODUCTION, not PILOT: a pre-flight has to exercise
+        the settings the batch will actually run under, so `samples` and
+        the gate match production rather than the more thorough pilot.
+
+        The one deviation is the critic, and only when there is no real
+        provider: `EchoProvider` cannot produce a valid `Review`, so
+        leaving the critic on made the no-provider path raise instead of
+        reporting. `live=False` is a plumbing check by definition, so it
+        runs `critic_mode="off"` — and `SmokeResult.warnings` says so,
+        rather than letting a green result imply the prompts were tested.
+        """
+        intake = self._intake()
+        cfg = TranslateConfig(
+            game=intake.game, source_lang=intake.source_lang, locale=locale,
+            kind="production", client_lang=intake.client_lang,
+            dry_run=not live,
+            critic_mode="flagged" if live else "off", samples=1,
+            gate=GateConfig(source_lang=intake.source_lang,
+                            target_lang=locale,
+                            locked_terms=(glossary.locked_map()
+                                          if glossary else {})))
+        ctx = StageContext(
+            provider=provider, cfg=cfg, run_db=scratch,
+            tm=TranslationMemory(self.store.tm_path()),
+            glossary=glossary, style_brief=self._style_or_none(),
+            observations=None, attempt=0)
+        return run_translate_stage(ctx, f"{self.job_id}-smoke")
 
     def _provider(self, stage: Stage,
                   factory: Optional[ProviderFactory],

@@ -488,6 +488,46 @@ class SegmentRef(Strict):
     domain: Domain = Domain.UI
 
 
+class SmokeResult(Strict):
+    """What a pre-flight smoke run found, per locale.
+
+    Deliberately NOT a job artifact. A smoke run is a question about the
+    configuration, not a step in the lifecycle, so nothing it produces is
+    allowed to satisfy a `derive()` check or consume pending segments.
+    """
+    locale: str
+    kind: str                       # translate | lqa
+    sampled: int                    # strings actually put through the model
+    pending_total: int              # what the real batch would process
+    ok: bool
+    # The configuration a reviewer needs to eyeball BEFORE the batch. A
+    # wrong-locale or empty-glossary run is cheap to spot here and
+    # expensive to spot in 400 findings.
+    source_lang: str = ""
+    target_lang: str = ""
+    glossary_terms: int = 0
+    glossary_source: str = "none"
+    style_brief: bool = False
+    provider: str = ""
+    model: str = ""
+    # Evidence, not just counts: real source→target pairs to read.
+    samples: List[Dict[str, str]] = Field(default_factory=list)
+    findings: List[Dict[str, str]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    tokens_spent: float = 0.0
+    elapsed_s: float = 0.0
+
+    def cost_projection(self) -> float:
+        """Tokens the full batch would cost at the observed per-string rate.
+
+        The number that decides whether to launch, so it is computed from
+        THIS run's measurements rather than a stored estimate."""
+        if not self.sampled or not self.tokens_spent:
+            return 0.0
+        return self.tokens_spent / self.sampled * self.pending_total
+
+
 class TranslateRunSummary(Strict):
     """Artifact emitted when a Stage-4 graph run completes; the Controller
     derives PILOT/PRODUCTION completion from it."""

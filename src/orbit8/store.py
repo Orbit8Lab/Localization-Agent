@@ -143,6 +143,19 @@ class JobStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
+    def smoke_db_path(self, locale: str) -> Path:
+        """Scratch DB for a pre-flight smoke run.
+
+        Kept OUT of `runs/` on purpose: everything in `runs/` is the real
+        translation state, and a smoke run marking segments accepted there
+        would silently shrink the batch it was meant to de-risk. Under
+        `smoke/` it is obviously disposable, and `derive()` never looks at
+        it, so a smoke run can never advance the job.
+        """
+        path = self.job_dir / "smoke" / f"{locale}.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     def tm_path(self) -> Path:
         path = self.job_dir / "assets" / "tm.db"
         path.parent.mkdir(parents=True, exist_ok=True)

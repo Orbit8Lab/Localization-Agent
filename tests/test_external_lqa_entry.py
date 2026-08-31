@@ -616,19 +616,32 @@ def test_lqa_run_is_in_the_tool_set():
 
 def test_each_locale_audit_gets_its_own_name(tmp_path):
     """One report per language pair — a shared name would overwrite every
-    earlier locale's findings."""
+    earlier locale's findings.
+
+    Each locale needs its OWN pairs file. This test used to audit one ja
+    file twice, as ja and then as ko, because only the run name was under
+    test — and that is exactly the confusion the locale guard now refuses
+    (see test_lqa_audit_locale.py). Two files is also what the real
+    workflow produces.
+    """
     chat = _multi_locale_chat(tmp_path)
-    pairs = tmp_path / "proj" / "p.jsonl"
-    pairs.write_text(json.dumps({
-        "key": "A", "source_language": "en", "target_language": "ja",
-        "source_text": "Start", "target_text": "開始"},
-        ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def pairs_for(locale: str, target: str) -> str:
+        name = f"p_{locale}.jsonl"
+        (tmp_path / "proj" / name).write_text(json.dumps({
+            "key": "A", "source_language": "en", "target_language": locale,
+            "source_text": "Start", "target_text": target},
+            ensure_ascii=False) + "\n", encoding="utf-8")
+        return name
 
     first = json.loads(chat._t_lqa_run(
-        {"pairs": "p.jsonl", "locale": "ja", "deterministic_only": True}))
+        {"pairs": pairs_for("ja", "開始"), "locale": "ja",
+         "deterministic_only": True}))
     second = json.loads(chat._t_lqa_run(
-        {"pairs": "p.jsonl", "locale": "ko", "deterministic_only": True}))
+        {"pairs": pairs_for("ko", "시작"), "locale": "ko",
+         "deterministic_only": True}))
     assert first["name"] != second["name"]
+    assert (first["locale"], second["locale"]) == ("ja", "ko")
 
 
 def test_an_unknown_locale_is_refused(tmp_path):

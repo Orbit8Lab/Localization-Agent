@@ -59,6 +59,66 @@ def _cmd_init(args) -> int:
     return 0
 
 
+def _cmd_smoke(args) -> int:
+    """Pre-flight before a large batch: real model, a few strings per
+    locale, nothing written to the job.
+
+    Exit codes are the point — this is meant to gate a batch in a script:
+    0 = safe to launch, 1 = at least one locale failed."""
+    job = Job(Path(args.root), args.job_id)
+    factory = None
+    if not args.dry_run:
+        factory = lambda locale: OpenAICompatProvider(
+            args.provider, model=args.model, api_key=args.api_key)
+    try:
+        results = job.smoke(factory, size=args.size,
+                            locales=(args.locales.split(",")
+                                     if args.locales else None))
+    except ValueError as err:
+        print(f"✗ {err}", file=sys.stderr)
+        return 1
+
+    total_projection = 0.0
+    for r in results:
+        mark = "✓" if r.ok else "✗"
+        print(f"\n{mark} {r.locale}  ({r.source_lang} → {r.target_lang})")
+        print(f"    sampled:  {r.sampled} of {r.pending_total} pending"
+              f"   {r.elapsed_s}s")
+        print(f"    glossary: {r.glossary_terms} terms "
+              f"[{r.glossary_source}]"
+              f"   style brief: {'yes' if r.style_brief else 'no'}")
+        if r.provider:
+            print(f"    provider: {r.provider}"
+                  + (f" / {r.model}" if r.model else ""))
+        if r.error:
+            print(f"    error:    {r.error}")
+        for w in r.warnings:
+            print(f"    ! {w}")
+        # The samples are the deliverable. A reviewer catching a
+        # wrong-language or empty rendering here saves the whole batch.
+        for sample in r.samples:
+            print(f"      {sample['uid']}  {sample['source'][:44]}")
+            print(f"            → {sample['target'][:44]}"
+                  f"   [{sample['status']}]")
+        projection = r.cost_projection()
+        total_projection += projection
+        if projection:
+            print(f"    projected batch cost: ~{projection:,.0f} tokens "
+                  f"({r.tokens_spent:,.0f} for {r.sampled})")
+
+    failed = [r.locale for r in results if not r.ok]
+    print()
+    if total_projection:
+        print(f"projected total: ~{total_projection:,.0f} tokens")
+    if failed:
+        sys.stdout.flush()
+        print(f"✗ SMOKE FAILED: {', '.join(failed)} — do not launch the "
+              f"batch", file=sys.stderr)
+        return 1
+    print("✓ smoke passed — review the samples above before launching")
+    return 0
+
+
 def _cmd_next(args) -> int:
     job = Job(Path(args.root), args.job_id)
     factory = None
@@ -158,16 +218,23 @@ def _cmd_lqa_run(args) -> int:
     """Audit external translations (docs/skills/lqa-batch-split.md):
     content-classify → split story/strings files → tier cascade with
     per-class batch sizes."""
-    from .external_lqa import run_external_lqa
+    from .external_lqa import LocaleConflict, run_external_lqa
     job = Job(Path(args.root), args.job_id)
     provider = (None if args.deterministic_only else
                 OpenAICompatProvider(args.provider, model=args.model,
                                      api_key=args.api_key))
-    report = run_external_lqa(
-        job, provider, Path(args.pairs), name=args.name,
-        batch_story=args.batch_story, batch_string=args.batch_string,
-        t3_threshold=args.t3_threshold,
-        deterministic_only=args.deterministic_only)
+    try:
+        report = run_external_lqa(
+            job, provider, Path(args.pairs), name=args.name,
+            batch_story=args.batch_story, batch_string=args.batch_string,
+            t3_threshold=args.t3_threshold,
+            deterministic_only=args.deterministic_only, locale=args.locale)
+    except LocaleConflict as err:
+        print(f"✗ {err}", file=sys.stderr)
+        return 1
+    # First line of output: an audit scored against the wrong language is
+    # the one failure that looks like a flood of real findings.
+    print(f"locale:   {report.locale}")
     if report.cascade_ledger:
         print(f"cascade:  {json.dumps(report.cascade_ledger)}")
     if report.t3_stats:
@@ -187,6 +254,50 @@ def _cmd_lqa_run(args) -> int:
     if report.block_ship:
         print("✋ BLOCK SHIP: high-severity findings survived review")
         return 2
+    return 0
+
+
+def _cmd_lqa_smoke(args) -> int:
+    """Pre-flight before a full audit. Exit 1 on failure so a script can
+    gate the batch on it."""
+    from .external_lqa import smoke_audit
+    job = Job(Path(args.root), args.job_id)
+    provider = (None if args.deterministic_only else
+                OpenAICompatProvider(args.provider, model=args.model,
+                                     api_key=args.api_key))
+    r = smoke_audit(job, provider, Path(args.pairs), size=args.size,
+                    locale=args.locale)
+    print(f"locale:   {r.locale or '(unresolved)'}  "
+          f"({r.source_lang} → {r.target_lang or '?'})")
+    print(f"pairs:    {r.sampled} sampled of {r.pending_total}"
+          f"   {r.elapsed_s}s")
+    print(f"glossary: {r.glossary_terms} terms [{r.glossary_source}]"
+          f"   style brief: {'yes' if r.style_brief else 'no'}")
+    if r.provider:
+        print(f"provider: {r.provider}"
+              + (f" / {r.model}" if r.model else ""))
+    if r.error:
+        # Flush first: stderr and stdout interleave in a terminal, and an
+        # error printed above its own context reads as unrelated.
+        sys.stdout.flush()
+        print(f"\n✗ {r.error}", file=sys.stderr)
+        return 1
+    for w in r.warnings:
+        print(f"! {w}")
+    print("\nsampled pairs:")
+    for sample in r.samples:
+        print(f"  {sample['source'][:52]}")
+        print(f"    → {sample['target'][:52]}")
+    if r.findings:
+        print(f"\nfindings on the sample ({len(r.findings)}):")
+        for f in r.findings[:10]:
+            print(f"  [{f['severity']}] {f['bug_type']}: {f['message']}")
+    else:
+        print("\nno findings on the sample")
+    if not r.ok:
+        return 1
+    print("\n✓ smoke passed — read the samples and findings above, then "
+          "launch")
     return 0
 
 
@@ -1710,6 +1821,25 @@ def main(argv=None) -> int:
     init.add_argument("--tester-hours", type=float, default=8.0)
     init.set_defaults(func=_cmd_init)
 
+    smoke = sub.add_parser(
+        "smoke", help="pre-flight: real model on a few strings per locale, "
+                      "nothing written; exit 1 if any locale fails")
+    smoke.add_argument("root")
+    smoke.add_argument("job_id")
+    smoke.add_argument("--size", type=int, default=5,
+                       help="strings per locale (default 5)")
+    smoke.add_argument("--locales",
+                       help="comma-separated subset (default: all job "
+                            "target locales)")
+    smoke.add_argument("--provider", default="deepseek",
+                       choices=sorted(PROVIDER_PRESETS))
+    smoke.add_argument("--model")
+    smoke.add_argument("--api-key")
+    smoke.add_argument("--dry-run", action="store_true",
+                       help="EchoProvider instead of the real model: checks "
+                            "plumbing and config, NOT prompts")
+    smoke.set_defaults(func=_cmd_smoke)
+
     nxt = sub.add_parser("next",
                          help="run the next step, or print the pending gate")
     nxt.add_argument("root")
@@ -1755,6 +1885,11 @@ def main(argv=None) -> int:
     lrun.add_argument("--pairs", required=True,
                       help="bilingual JSONL (key/source_text/target_text)")
     lrun.add_argument("--name", default="dev-audit")
+    lrun.add_argument("--locale",
+                      help="language being audited (ja, ko, zh-Hant). "
+                           "Default: the pairs file's own target_language, "
+                           "else the first intake target locale. Refused if "
+                           "it contradicts the pairs file")
     lrun.add_argument("--batch-story", type=int, default=5)
     lrun.add_argument("--batch-string", type=int, default=20)
     lrun.add_argument("--t3-threshold", type=float, default=0.75,
@@ -1769,6 +1904,25 @@ def main(argv=None) -> int:
     lrun.add_argument("--model")
     lrun.add_argument("--api-key")
     lrun.set_defaults(func=_cmd_lqa_run)
+
+    lsmoke = lsub.add_parser(
+        "smoke", help="pre-flight an audit: resolve the locale, load the "
+                      "glossary, review a few real pairs; nothing written")
+    lsmoke.add_argument("root")
+    lsmoke.add_argument("job_id")
+    lsmoke.add_argument("--pairs", required=True)
+    lsmoke.add_argument("--locale",
+                        help="same precedence as `lqa run`; a contradiction "
+                             "with the pairs file is reported here")
+    lsmoke.add_argument("--size", type=int, default=5)
+    lsmoke.add_argument("--deterministic-only", action="store_true",
+                        help="T1+T2 only; checks config, NOT the reviewer "
+                             "prompt")
+    lsmoke.add_argument("--provider", default="deepseek",
+                        choices=sorted(PROVIDER_PRESETS))
+    lsmoke.add_argument("--model")
+    lsmoke.add_argument("--api-key")
+    lsmoke.set_defaults(func=_cmd_lqa_smoke)
 
     lreport = lsub.add_parser(
         "report", help="client bug report xlsx + tech summary from a "

@@ -283,13 +283,44 @@ uv run orbit8 status jobs demo-ko
 # $DEEPSEEK_API (auto-loaded from .ENV outside the repo, or $ORBIT8_ENV)
 uv run orbit8 next jobs demo-ko
 
-uv run pytest    # 565 tests incl. full INTAKE→RELEASE dry-run, sandbox,
+uv run pytest    # 698 tests incl. full INTAKE→RELEASE dry-run, sandbox,
                  # codegen retry loop, chat orchestrator, context assembly,
                  # .po format fidelity and display-width budgets
 ```
 
 `--dry-run` needs no API key at all, so the whole Controller / gate /
 artifact model is explorable before any spend.
+
+### Smoke test before a large batch
+
+`--dry-run` proves the plumbing; it swaps in `EchoProvider` and never
+sends a prompt, so it cannot tell you whether the batch is *configured*
+right. `smoke` can: it runs the **real** model on a handful of strings per
+locale and prints the resolved config plus the actual renderings.
+
+```bash
+uv run orbit8 smoke jobs demo-ko --size 5          # translate pre-flight
+uv run orbit8 lqa smoke jobs demo-ko \
+    --pairs exports/pairs_en-ja.jsonl --size 5     # audit pre-flight
+```
+
+Nothing is written to the job — the sample runs in a throwaway DB under
+`smoke/`, no artifact is produced, and `derive()` never sees it, so a
+smoke run cannot consume pending segments or advance the stage. Exit code
+is 1 if any locale fails, so it can gate a batch in a script:
+
+```bash
+uv run orbit8 smoke jobs demo-ko && uv run orbit8 next jobs demo-ko
+```
+
+Read the output, not just the exit code. It reports the resolved
+`source → target` pair, which glossary loaded and how many terms it
+enforces, whether a style brief was found, real source→target samples,
+and a token projection scaled from the sample to the full batch. The
+warnings are the point: *every sampled string was flagged* is the
+signature of a wrong-locale or wrong-glossary run, and *no glossary
+resolved* explains a suspiciously clean terminology result before you
+believe it.
 
 ## v0 simplifications (deliberate, documented)
 

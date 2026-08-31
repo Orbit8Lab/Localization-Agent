@@ -226,6 +226,16 @@ CHECKED, a termbase entry is a term that is LAW. Run it once per locale. \
 "lock" records that a HUMAN ratified the renderings: the T1 terminology \
 check enforces the termbase either way, while the T2 cross-corpus \
 consistency check speaks only for locked terms.
+- {"tool": "lqa_smoke", "args": {"pairs": "<bilingual .jsonl>", \
+"locale": "<target locale>", "size": 5}} — PRE-FLIGHT an audit before \
+running it: resolves the locale, loads the glossary and reviews a few \
+real pairs, writing NOTHING. Run this FIRST whenever the operator is \
+about to audit a large file, and report what it says — the resolved \
+locale, how many glossary terms are enforced, and the sampled pairs. It \
+costs seconds and catches the misconfiguration that a full audit \
+reports as hundreds of real-looking defects. If it warns that EVERY \
+sampled string was flagged, STOP and tell the operator: that is a \
+wrong-locale or wrong-glossary run, not a bad translation.
 - {"tool": "lqa_run", "args": {"pairs": "<bilingual .jsonl>", "locale": \
 "<target locale>", "name": "<audit name>", "deterministic_only": false}} \
 — audit a bilingual JSONL through the tier cascade (T1 mechanical → T2 \
@@ -233,7 +243,10 @@ consistency → T3 semantic → verifier), attempt-versioned under s5. This \
 is what a `standardize` → bilingual_jsonl output feeds: use it for \
 .jsonl, `scan_po` for a .po. Run it ONCE PER LOCALE — the cascade audits \
 one language pair at a time, so give each run its own "name" or later \
-locales overwrite earlier ones.
+locales overwrite earlier ones. "locale" names the language being \
+audited and must match the pairs file, which the audit refuses to \
+review under any other language's glossary and rules; omit it and the \
+pairs file's own target_language decides.
 - {"tool": "scan_po", "args": {"po": "<translated bilingual .po>", \
 "glossary": "<optional — defaults to the project's active termbase>", \
 "out_dir": "<work folder>", "game": "<name>", \
@@ -271,6 +284,7 @@ audit) + a Needs-EN work queue. Prefer this over update_glossary when \
 the operator wants a glossary BUILT from a corpus or complains the \
 review has sentence-length entries.
 - {"tool": "deliver_po", "args": {"review": "<filled review .xlsx>", \
+"locale": "<target locale — required when the job has several>", \
 "po_files": ["<shipped .po>", …], "out_dir": "<optional, default \
 30-deliverables>", "timestamp": "<optional YYYYMMDD>"}} — apply the \
 post-editing team's decisions to the .po files and write a timestamped \
@@ -1002,6 +1016,30 @@ class ChatOrchestrator:
                 + " It is already at the per-locale path the pipeline "
                   "resolves; no promote step is needed.")}, ensure_ascii=False)
 
+    def _t_lqa_smoke(self, args: dict) -> str:
+        """Pre-flight an audit before spending a batch on it.
+
+        Cheap enough that there is no reason to skip it, and it catches
+        the failure class that a full audit reports as a flood of genuine
+        findings: a wrong resolved locale, a glossary that loaded for
+        another language, or one that did not load at all.
+        """
+        from .external_lqa import smoke_audit
+
+        pairs = self._confine_read(str(args.get("pairs", "")))
+        if not pairs.exists():
+            return f"error: no pairs file at {pairs}"
+        locale = str(args.get("locale") or "")
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        if locale and locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+        size = int(args.get("size") or 5)
+        provider = None if self.dry_run else self.provider
+        result = smoke_audit(self.job, provider, pairs, size=size,
+                             locale=locale or None)
+        return result.model_dump_json(exclude_none=True)
+
     def _t_lqa_run(self, args: dict) -> str:
         """Audit a bilingual JSONL through the full tier cascade.
 
@@ -1028,22 +1066,28 @@ class ChatOrchestrator:
         # report per language pair is what the cascade produces, and
         # overwriting them would lose every earlier locale's findings.
         name = str(args.get("name") or f"{locale or 'audit'}-audit")
+        try:
+            report = run_external_lqa(
+                self.job, provider, pairs, name=name,
+                deterministic_only=deterministic or provider is None,
+                locale=locale or None)
+        except Exception as err:
+            return f"error: {type(err).__name__}: {err}"
         # Say WHICH glossary was used, and say so when there was none.
         # Without this, "no terminology findings" is ambiguous between
         # "the translations are clean" and "the terminology check never
         # had any terms" — and the second reads as a clean bill of health.
         # `scan_po` already reports this; the omission here was an
         # inconsistency, not a decision.
-        glossary = self.job._glossary(locale) if locale else None
+        #
+        # Counted from `report.locale`, not the `locale` argument: when
+        # the caller omits it the cascade resolves one from the pairs
+        # file, and counting the argument reported 0 terms enforced for a
+        # run that enforced a full termbase.
+        glossary = self.job._glossary(report.locale)
         enforced = len(glossary.locked_map()) if glossary else 0
-        try:
-            report = run_external_lqa(
-                self.job, provider, pairs, name=name,
-                deterministic_only=deterministic or provider is None)
-        except Exception as err:
-            return f"error: {type(err).__name__}: {err}"
         return json.dumps({
-            "status": "complete", "name": name, "locale": locale,
+            "status": "complete", "name": name, "locale": report.locale,
             "glossary_terms_enforced": enforced,
             "checked": report.checked,
             "flagged_strings": report.flagged_strings,
@@ -1186,12 +1230,27 @@ class ChatOrchestrator:
                    if args.get("out_dir")
                    else project_root / "30-deliverables")
         intake = self.job.store.read(0, "intake", IntakeBrief)
+        # Same guard as `standardize`: never guess the locale when several
+        # are configured. This wrote every delivery's renderings into
+        # target_locales[0]'s translation memory, so a ja delivery under a
+        # zh-CN-first intake poisoned the zh-CN TM with Japanese.
+        locale = str(args.get("locale") or "")
+        if not locale:
+            if len(intake.target_locales) != 1:
+                return (f"error: this job has "
+                        f"{len(intake.target_locales)} target locales "
+                        f"({', '.join(intake.target_locales)}); pass "
+                        f'"locale" to say which one this delivery is for')
+            locale = intake.target_locales[0]
+        if locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
         report = deliver_from_review(
             review, po_files, out_dir,
             timestamp=(str(args["timestamp"])
                        if args.get("timestamp") else None),
             tm=TranslationMemory(self.job.store.tm_path()),
-            locale=intake.target_locales[0])
+            locale=locale)
         return json.dumps(
             {"counts": report.counts(), "outputs": report.outputs,
              "report": f"{report.delivery_dir}/DELIVERY_REPORT.md",
@@ -1249,6 +1308,7 @@ class ChatOrchestrator:
                 "add_glossary_terms": self._t_add_glossary_terms,
                 "translate_po": self._t_translate_po,
                 "scan_po": self._t_scan_po,
+                "lqa_smoke": self._t_lqa_smoke,
                 "lqa_run": self._t_lqa_run,
                 "glossary_from_sheet":
                     self._t_glossary_from_sheet}
