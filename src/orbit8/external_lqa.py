@@ -41,20 +41,37 @@ def load_pairs(path: Path) -> List[dict]:
 
 
 def seed_audit_db(db: RunDB, pairs: List[dict]) -> None:
-    """Dedup by source text (same contract as ingest); the dev's target
-    rides in as the 'accepted' translation under audit."""
-    by_text: Dict[str, dict] = {}
+    """Dedup by (source text, target text); the dev's target rides in as
+    the 'accepted' translation under audit.
+
+    Deduping by SOURCE ALONE was wrong here, and wrong in a way that
+    corrupts the client report rather than merely losing coverage. Game
+    dialogue repeats a line verbatim — "Who are you?", "Yes." — and the
+    same English is legitimately rendered differently by speaker, gender
+    or context. Keeping the first target and attaching it to every
+    occurrence produced bug rows whose Source Text and Current
+    Translation were DIFFERENT LINES: an audit reporting a defect in a
+    translation that was never there.
+
+    Pairing on both sides keeps each distinct rendering as its own row,
+    so a real inconsistency surfaces as two rows to compare instead of
+    one row silently overwriting the other. Identical (source, target)
+    repeats still collapse, which is the saving the dedup exists for.
+    """
+    by_pair: Dict[Tuple[str, str], List[str]] = {}
     for pair in pairs:
-        entry = by_text.setdefault(
-            pair["source_text"], {"keys": [], "target": pair["target_text"]})
-        entry["keys"].append(pair["key"])
-    uniques = [UniqueString(uid=f"u{i:04d}", text=text, keys=entry["keys"])
-               for i, (text, entry) in enumerate(by_text.items())]
+        by_pair.setdefault(
+            (pair["source_text"], pair["target_text"]), []
+        ).append(pair["key"])
+    uniques, targets = [], {}
+    for index, ((text, target), keys) in enumerate(by_pair.items()):
+        uid = f"u{index:04d}"
+        uniques.append(UniqueString(uid=uid, text=text, keys=keys))
+        targets[uid] = target
     db.seed(uniques)
     for unique in uniques:
         db.record(unique.uid, status="accepted",
-                  target=by_text[unique.text]["target"],
-                  resolution="external")
+                  target=targets[unique.uid], resolution="external")
 
 
 def classify_content(provider: Provider, db: RunDB) -> Dict[str, int]:

@@ -1110,3 +1110,55 @@ def test_a_report_builds_without_a_style_brief(tmp_path):
 
     attempt = job.store.stage_dir(5, job.store.latest_attempt(5))
     assert list(attempt.glob("*Bug_Report*.xlsx"))
+
+
+# ------------------------- dedup must not fabricate source/target pairs
+
+def _seeded(pairs):
+    import tempfile
+    from orbit8.external_lqa import seed_audit_db
+    from orbit8.memory import RunDB
+    db = RunDB(Path(tempfile.mkdtemp()) / "t.db")
+    seed_audit_db(db, pairs)
+    return db.all_segments()
+
+
+def test_one_source_with_two_translations_keeps_both():
+    """Deduping by SOURCE alone kept the first target and attached it to
+    every occurrence, producing client bug rows whose Source Text and
+    Current Translation were DIFFERENT LINES — an audit reporting a
+    defect in a translation that was never there.
+
+    Game dialogue repeats verbatim ("Who are you?", "Yes.") and the same
+    English is legitimately rendered differently by speaker or context.
+    """
+    rows = _seeded([
+        {"key": "A", "source_text": "Who are you?",
+         "target_text": "小雪:你是谁？"},
+        {"key": "B", "source_text": "Who are you?",
+         "target_text": "木灵:你是谁？"},
+    ])
+    assert len(rows) == 2
+    assert {r["target"] for r in rows} == {"小雪:你是谁？", "木灵:你是谁？"}
+
+
+def test_identical_pairs_still_collapse():
+    """The saving dedup exists for: the same line translated the same way
+    is one row, however often it repeats."""
+    rows = _seeded([
+        {"key": f"K{n}", "source_text": "Yes.", "target_text": "是。"}
+        for n in range(5)])
+    assert len(rows) == 1
+    assert rows[0]["keys"] == ["K0", "K1", "K2", "K3", "K4"]
+
+
+def test_every_row_pairs_its_own_source_and_target():
+    """The invariant the report depends on: a bug row must quote the
+    translation that actually belongs to its source."""
+    pairs = [
+        {"key": "A", "source_text": "Hello", "target_text": "你好"},
+        {"key": "B", "source_text": "Hello", "target_text": "您好"},
+        {"key": "C", "source_text": "Bye", "target_text": "再见"},
+    ]
+    expected = {(p["source_text"], p["target_text"]) for p in pairs}
+    assert {(r["text"], r["target"]) for r in _seeded(pairs)} == expected
