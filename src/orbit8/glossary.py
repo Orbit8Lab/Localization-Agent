@@ -61,13 +61,27 @@ class Glossary:
     # ------------------------------------------------------------ queries
 
     def locked_map(self, locked_only: bool = False) -> Dict[str, str]:
-        """source term -> locked rendering, for the deterministic gate.
+        """source term -> rendering, for the deterministic gate.
         Only T1 terms are hard gate constraints; T2/T3 steer prompts.
 
         ``locked_only`` restricts the map to entries a human actually
-        ratified. A T1 file is mostly MINED terms — the termbase's best
-        guess — and enforcing those as law reports correct translations
-        as defects.
+        ratified.
+
+        The two callers differ ON PURPOSE, and the difference is easy to
+        misread as a bug:
+
+        - the **T1 term check** (controller, external_lqa) passes NOTHING,
+          so every tier-1 term is enforced. A tier-1 entry got there by a
+          deliberate act — a publisher's glossary, an operator's ruling —
+          and is authoritative on arrival.
+        - the **T2 consistency check** (graphs/lqa.py) passes
+          ``locked_only=True``. It flags a term rendered inconsistently
+          ACROSS the corpus, which is a much stronger claim, so it speaks
+          only for renderings a human ratified.
+
+        So ``locked`` is provenance — "a human signed off on this" — not a
+        switch that turns enforcement on. An unlocked termbase still
+        produces T1 terminology findings.
         """
         return {t.term: t.translation for t in self.terms.values()
                 if t.tier == 1 and (t.locked or not locked_only)}

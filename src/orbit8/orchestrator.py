@@ -223,9 +223,9 @@ deliver_po after post-editing.
 SHEET → the T1 termbase the deterministic gate enforces. This is NOT a \
 conversion of bilingual_jsonl: a JSONL row is a translation to be \
 CHECKED, a termbase entry is a term that is LAW. Run it once per locale. \
-"lock" defaults to false — an unratified client sheet enforced as law \
-reports correct translations as defects, so ASK the operator before \
-locking.
+"lock" records that a HUMAN ratified the renderings: the T1 terminology \
+check enforces the termbase either way, while the T2 cross-corpus \
+consistency check speaks only for locked terms.
 - {"tool": "lqa_run", "args": {"pairs": "<bilingual .jsonl>", "locale": \
 "<target locale>", "name": "<audit name>", "deterministic_only": false}} \
 — audit a bilingual JSONL through the tier cascade (T1 mechanical → T2 \
@@ -989,14 +989,18 @@ class ChatOrchestrator:
             "status": "complete", "terms": len(terms), "skipped": skipped,
             "locked": lock, "path": str(out),
             "next": (
-                "This termbase is written. "
-                + ("Terms are ADVISORY (locked=false) — the gate will not "
-                   "enforce them. Ask the operator whether to lock them "
-                   "before relying on terminology findings."
-                   if not lock else
-                   "Terms are LOCKED and the gate enforces them.")
-                + " Promote it with `orbit8 glossary promote` to make it "
-                  "the project's active termbase.")}, ensure_ascii=False)
+                "This termbase is written and the T1 terminology check "
+                "enforces it — locked or not. `locked` records that a "
+                "HUMAN ratified the rendering: unlocked terms are checked "
+                "for term violations, but the T2 cross-corpus consistency "
+                "check speaks only for locked ones. "
+                + ("Terms are LOCKED, so both checks apply."
+                   if lock else
+                   "These are UNLOCKED, so T2 consistency will skip them "
+                   "— lock them once the client's renderings are "
+                   "confirmed.")
+                + " It is already at the per-locale path the pipeline "
+                  "resolves; no promote step is needed.")}, ensure_ascii=False)
 
     def _t_lqa_run(self, args: dict) -> str:
         """Audit a bilingual JSONL through the full tier cascade.
@@ -1024,6 +1028,14 @@ class ChatOrchestrator:
         # report per language pair is what the cascade produces, and
         # overwriting them would lose every earlier locale's findings.
         name = str(args.get("name") or f"{locale or 'audit'}-audit")
+        # Say WHICH glossary was used, and say so when there was none.
+        # Without this, "no terminology findings" is ambiguous between
+        # "the translations are clean" and "the terminology check never
+        # had any terms" — and the second reads as a clean bill of health.
+        # `scan_po` already reports this; the omission here was an
+        # inconsistency, not a decision.
+        glossary = self.job._glossary(locale) if locale else None
+        enforced = len(glossary.locked_map()) if glossary else 0
         try:
             report = run_external_lqa(
                 self.job, provider, pairs, name=name,
@@ -1032,14 +1044,22 @@ class ChatOrchestrator:
             return f"error: {type(err).__name__}: {err}"
         return json.dumps({
             "status": "complete", "name": name, "locale": locale,
+            "glossary_terms_enforced": enforced,
             "checked": report.checked,
             "flagged_strings": report.flagged_strings,
             "findings_total": report.findings_total,
             "by_severity": report.by_severity,
             "by_bug_type": report.by_bug_type,
-            "next": (f"Audit '{name}' is DONE — do not re-run it. Report "
-                     f"the counts; `orbit8 lqa report` turns it into a "
-                     f"client xlsx.")}, ensure_ascii=False)
+            "next": (
+                (f"NO GLOSSARY was loaded for {locale or 'this locale'}, so "
+                 f"the terminology check had nothing to enforce — report "
+                 f"that plainly rather than as a clean result. Build one "
+                 f"with glossary_from_sheet. "
+                 if enforced == 0 else
+                 f"{enforced} glossary term(s) were enforced. ")
+                + f"Audit '{name}' is DONE — do not re-run it. "
+                  f"`orbit8 lqa report` turns it into a client xlsx.")},
+            ensure_ascii=False)
 
     def _t_scan_po(self, args: dict) -> str:
         from .po_scan import scan_po

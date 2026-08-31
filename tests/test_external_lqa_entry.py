@@ -907,9 +907,56 @@ def test_the_agent_can_build_a_termbase_from_a_publisher_sheet(tmp_path):
     assert payload["terms"]["Barrier"]["locked"]
 
 
-def test_the_agent_warns_when_terms_are_not_locked(tmp_path):
-    """Advisory terms mean the gate finds no terminology defects — which
-    reads as a clean result rather than a check that never ran."""
+def test_an_unlocked_termbase_still_produces_terminology_findings(tmp_path):
+    """`locked` is PROVENANCE, not an enforcement switch — a distinction
+    worth pinning because the natural reading is the opposite.
+
+    The T1 term check calls `locked_map()` with no argument, so every
+    tier-1 term is enforced: a tier-1 entry got there by a deliberate act
+    (a publisher glossary, an operator ruling) and is authoritative on
+    arrival. Only the T2 cross-corpus consistency check — a much stronger
+    claim — restricts itself to ratified renderings.
+    """
+    from orbit8.cli import main
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    (project / "40-reference" / "glossary").mkdir(parents=True)
+    main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+          "--source-column", "English", "--target-column", "日本語",
+          "--locale", "ja",                       # NOT --lock
+          "--out", str(project / "40-reference" / "glossary"
+                       / "glossary_terms.ja.json")])
+
+    pairs = project / "20-work" / "p.jsonl"
+    pairs.write_text(json.dumps({
+        "key": "A", "source_language": "en", "target_language": "ja",
+        "source_text": "Use the Barrier now",
+        "target_text": "漁網を使え"}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+
+    job = Job.init(project / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    glossary = job._glossary("ja")
+    assert glossary.locked_map() == {"Barrier": "バリア",
+                                     "Season Trial": "季節の試練"}
+    assert glossary.locked_map(locked_only=True) == {}      # T2 sees none
+
+    chat = ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+    result = json.loads(chat._t_lqa_run(
+        {"pairs": str(pairs), "locale": "ja", "name": "u",
+         "deterministic_only": True}))
+    assert result["by_bug_type"].get("terminology") == 1
+
+
+def test_the_agent_explains_what_locking_actually_changes(tmp_path):
+    """The message must not claim unlocked terms go unenforced — they
+    do not."""
     from orbit8.llm import EchoProvider
     from orbit8.orchestrator import ChatOrchestrator
 
@@ -933,7 +980,8 @@ def test_the_agent_warns_when_terms_are_not_locked(tmp_path):
         "sheet": "10-received/t.xlsx", "source_column": "English",
         "target_column": "日本語", "locale": "ja"}))
     assert not result["locked"]
-    assert "ADVISORY" in result["next"]
+    assert "enforces it — locked or not" in result["next"]
+    assert "T2 cross-corpus consistency" in result["next"]
 
 
 def test_each_locale_resolves_its_own_termbase(tmp_path):
@@ -984,3 +1032,81 @@ def test_the_locale_less_termbase_still_resolves(tmp_path):
 
     found, _notes = resolve_glossary(project_root=project, locale="ja")
     assert found == glossary / "glossary_terms.json"
+
+
+def test_an_audit_says_whether_a_glossary_was_loaded(tmp_path):
+    """"No terminology findings" is ambiguous between "the translations
+    are clean" and "the check had no terms" — and the second reads as a
+    clean bill of health. `scan_po` already reported this; omitting it
+    here was an inconsistency, not a decision."""
+    from orbit8.cli import main
+    from orbit8.llm import EchoProvider
+    from orbit8.orchestrator import ChatOrchestrator
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    (project / "40-reference" / "glossary").mkdir(parents=True)
+    pairs = project / "20-work" / "p.jsonl"
+    pairs.write_text(json.dumps({
+        "key": "A", "source_language": "en", "target_language": "ja",
+        "source_text": "Use the Barrier", "target_text": "漁網を使え"},
+        ensure_ascii=False) + "\n", encoding="utf-8")
+
+    job = Job.init(project / "jobs", "j",
+                   intake=IntakeBrief(game="G", source_lang="en",
+                                      target_locales=["ja"]),
+                   source_files=[])
+    chat = ChatOrchestrator(job, EchoProvider("ja"), operator="t",
+                            dry_run=True)
+
+    # no glossary yet
+    without = json.loads(chat._t_lqa_run(
+        {"pairs": str(pairs), "locale": "ja", "name": "a",
+         "deterministic_only": True}))
+    assert without["glossary_terms_enforced"] == 0
+    assert "NO GLOSSARY" in without["next"]
+
+    main(["glossary", "from-sheet", str(_term_sheet(tmp_path)),
+          "--source-column", "English", "--target-column", "日本語",
+          "--locale", "ja",
+          "--out", str(project / "40-reference" / "glossary"
+                       / "glossary_terms.ja.json")])
+
+    with_gloss = json.loads(chat._t_lqa_run(
+        {"pairs": str(pairs), "locale": "ja", "name": "b",
+         "deterministic_only": True}))
+    assert with_gloss["glossary_terms_enforced"] == 2
+    assert "NO GLOSSARY" not in with_gloss["next"]
+    assert with_gloss["by_bug_type"].get("terminology") == 1
+
+
+def test_a_report_builds_without_a_style_brief(tmp_path):
+    """`lqa report` read the STRICT style brief, so it raised for exactly
+    the jobs that need it most: an external audit never runs CONTEXT, so
+    no s2 artifact exists, and the findings were computed but the report
+    could not be built from them."""
+    from orbit8.cli import main
+
+    project = tmp_path / "proj"
+    (project / "20-work").mkdir(parents=True)
+    (project / "40-reference").mkdir(parents=True)
+    pairs = project / "20-work" / "p.jsonl"
+    pairs.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in [
+        {"key": "line:1", "source_language": "en",
+         "target_language": "zh-CN", "source_text": "Start Game",
+         "target_text": "开始游戏", "location": "UI/menu"},
+    ]) + "\n", encoding="utf-8")
+
+    job = Job.init(project / "jobs", "j",
+                   intake=IntakeBrief(game="Nomori", source_lang="en",
+                                      target_locales=["zh-CN"]),
+                   source_files=[])
+    assert not job.store.exists(2, "style_brief")
+
+    main(["lqa", "run", str(project / "jobs"), "j", "--pairs", str(pairs),
+          "--name", "a", "--deterministic-only"])
+    assert main(["lqa", "report", str(project / "jobs"), "j",
+                 "--name", "a", "--no-suggestions"]) == 0
+
+    attempt = job.store.stage_dir(5, job.store.latest_attempt(5))
+    assert list(attempt.glob("*Bug_Report*.xlsx"))

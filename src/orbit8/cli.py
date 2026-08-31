@@ -218,7 +218,11 @@ def _cmd_lqa_report(args) -> int:
             provider, report.items, game=intake.game,
             source_lang=intake.source_lang, locale=report.locale,
             glossary=job._glossary(report.locale),
-            style_brief=job._style())
+            # Tolerant reader: an EXTERNAL audit never ran
+            # CONTEXT, so there is no s2 brief — the strict
+            # one raised and made the report unbuildable for
+            # exactly the jobs that need it most.
+            style_brief=job._style_or_none())
 
     locations = (load_locations(Path(args.locations_from))
                  if args.locations_from else None)
@@ -861,12 +865,16 @@ def _cmd_glossary_from_sheet(args) -> int:
     print(f"{len(terms)} term(s) → {out}")
     if skipped:
         print(f"  {skipped} row(s) skipped (missing term or rendering)")
-    print(f"  locked: {bool(args.lock)}"
-          + ("" if args.lock else
-             "  — terms are ADVISORY until ratified; re-run with --lock, "
-             "or lock individual rulings with `orbit8 glossary add`"))
-    print(f"\nMake it the project's active termbase:\n"
-          f"  uv run orbit8 glossary promote {out}")
+    print(f"  locked: {bool(args.lock)}")
+    print("  The T1 terminology check enforces these either way; `locked` "
+          "records that a\n  human ratified the rendering, and the T2 "
+          "cross-corpus consistency check\n  speaks only for locked terms.")
+    if out.name.startswith("glossary_terms.") and out.name != "glossary_terms.json":
+        print("\nAlready at the per-locale path the pipeline resolves — no "
+              "promote step needed.")
+    else:
+        print(f"\nMake it the project's active termbase:\n"
+              f"  uv run orbit8 glossary promote {out}")
     return 0
 
 
@@ -2030,11 +2038,12 @@ def main(argv=None) -> int:
     gsheet.add_argument("--out", help="output path (default: beside the "
                                       "sheet)")
     gsheet.add_argument("--lock", action="store_true",
-                        help="mark every term LOCKED (law for the gate). "
-                             "Off by default: a client sheet is a proposal "
-                             "until ratified, and unratified terms "
-                             "enforced as law report correct strings as "
-                             "defects")
+                        help="mark terms as human-ratified. The T1 "
+                             "terminology check enforces them either way; "
+                             "locking additionally enables the T2 "
+                             "cross-corpus consistency check, which makes "
+                             "a stronger claim and so speaks only for "
+                             "renderings someone signed off on")
     gsheet.set_defaults(func=_cmd_glossary_from_sheet)
 
     gpro = gsub.add_parser(
