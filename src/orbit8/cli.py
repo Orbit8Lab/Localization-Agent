@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
+from typing import List, Optional
 
 from .controller import GATES, GATE_NAMES, Job, Stage
 from .llm import OpenAICompatProvider, PROVIDER_PRESETS
@@ -308,6 +310,37 @@ def _cmd_lqa_smoke(args) -> int:
     return 0
 
 
+def _locale_in_name(name: str, locales: List[str]) -> Optional[str]:
+    """The locale a run name refers to, if any.
+
+    Run names are conventionally `lqa-<locale>-<date>`. Matching against
+    the job's OWN locales rather than a locale-shaped regex keeps this
+    from firing on unrelated names, and longest-first stops `zh-Hant`
+    from being read as a bare match when both it and `zh` are configured.
+    """
+    parts = set(re.split(r"[^A-Za-z0-9]+", name))
+    for locale in sorted(locales, key=len, reverse=True):
+        if locale in parts:
+            return locale
+    return None
+
+
+def _jsonl_target_language(path: Path) -> Optional[str]:
+    """The `target_language` a bilingual export declares, from its first
+    usable line. Best-effort: a malformed or absent field is not an error
+    here, it just means there is nothing to cross-check."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                lang = json.loads(line).get("target_language")
+                return lang if isinstance(lang, str) and lang else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def _cmd_lqa_report(args) -> int:
     """Client deliverable from a stored LQA report (skill:
     bug-report-builder): xlsx + technical summary, Repair-agent
@@ -364,6 +397,40 @@ def _cmd_lqa_report(args) -> int:
 
     locations = (load_locations(Path(args.locations_from))
                  if args.locations_from else None)
+
+    # A report's stored `locale` names the deliverable, so a wrong one
+    # ships a mislabelled file to the client. Two cheap cross-checks:
+    #
+    # 1. the run's NAME usually carries its locale (`lqa-ja-20260830`),
+    #    and disagreeing with the stored locale is the signature of an
+    #    audit that resolved its locale from the intake order rather than
+    #    its input — the bug that reviewed Japanese under zh-CN rules.
+    # 2. `--locations-from` is a bilingual export stamped with its own
+    #    `target_language`; pairing it with another locale's report
+    #    produces a bug report whose locations belong to a different file.
+    warnings = []
+    named = _locale_in_name(args.name, intake.target_locales)
+    if named and named != report.locale:
+        warnings.append(
+            f"the run is named {args.name!r} but the stored report says "
+            f"locale={report.locale!r}. This report was AUDITED as "
+            f"{report.locale}: its findings were scored against "
+            f"{report.locale} rules and its glossary, so they do not "
+            f"describe {named}. Re-run: orbit8 lqa run ... --locale {named}")
+    if args.locations_from:
+        loc_lang = _jsonl_target_language(Path(args.locations_from))
+        if loc_lang and loc_lang != report.locale:
+            warnings.append(
+                f"--locations-from is a {loc_lang} export but the report "
+                f"is {report.locale}; the locations would be attached to "
+                f"another locale's rows")
+    if warnings:
+        for warning in warnings:
+            print(f"! {warning}", file=sys.stderr)
+        if not args.force:
+            print("\n✗ refusing to write a mislabelled deliverable "
+                  "(--force to override)", file=sys.stderr)
+            return 1
 
     slug = intake.game.replace(" ", "")
     out_dir = (Path(args.out) if args.out
@@ -1957,6 +2024,10 @@ def main(argv=None) -> int:
     lreport.add_argument("root")
     lreport.add_argument("job_id")
     lreport.add_argument("--name", default="dev-audit")
+    lreport.add_argument("--force", action="store_true",
+                         help="write the deliverable even when the run "
+                              "name, the report's stored locale and "
+                              "--locations-from disagree")
     lreport.add_argument("--attempt", type=int,
                          help="s5 attempt (default: latest)")
     lreport.add_argument("--out", help="output dir (default: the s5 "
