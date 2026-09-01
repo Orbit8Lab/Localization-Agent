@@ -248,9 +248,16 @@ def _cmd_lqa_run(args) -> int:
         print(f"severity: {json.dumps(report.by_severity)}")
     if report.by_bug_type:
         print(f"bug type: {json.dumps(report.by_bug_type)}")
-    attempt = job.store.latest_attempt(5)
-    print(f"report:   {job.store.stage_dir(5, attempt)}/"
-          f"lqa_report.{args.name}.json")
+    # Locate the report by NAME. This run opened its own attempt, and
+    # concurrent or subsequent runs make "the latest attempt" the wrong
+    # answer for this report.
+    name = f"lqa_report.{args.name}"
+    attempt = job.store.find_attempt(5, name) or job.store.latest_attempt(5)
+    print(f"report:   {job.store.stage_dir(5, attempt)}/{name}.json")
+    # The name is what `lqa report` needs next, and there is no other
+    # place the operator can learn it.
+    print(f"next:     orbit8 lqa report {args.root} {args.job_id} "
+          f"--name {args.name}")
     if report.block_ship:
         print("✋ BLOCK SHIP: high-severity findings survived review")
         return 2
@@ -311,9 +318,29 @@ def _cmd_lqa_report(args) -> int:
     from .schemas import LQAReport, StyleBrief
     job = Job(Path(args.root), args.job_id)
     intake = job.store.read(0, "intake", IntakeBrief)
-    attempt = args.attempt or job.store.latest_attempt(5)
-    report = job.store.read(5, f"lqa_report.{args.name}", LQAReport,
-                            attempt=attempt)
+    # Find the attempt HOLDING this report, don't assume the newest one
+    # has it. Every `lqa run` opens its own attempt, so auditing four
+    # locales leaves four attempts each holding one locale's report — and
+    # defaulting to the latest made every earlier locale unreadable.
+    name = f"lqa_report.{args.name}"
+    attempt = args.attempt or job.store.find_attempt(5, name)
+    if attempt is None:
+        available = job.store.artifact_names(5)
+        reports = {n.split("lqa_report.", 1)[1]: a
+                   for n, a in sorted(available.items())
+                   if n.startswith("lqa_report.")}
+        print(f"✗ no LQA report named {args.name!r} in this job",
+              file=sys.stderr)
+        if reports:
+            print("\navailable reports:", file=sys.stderr)
+            for report_name, attempts in reports.items():
+                shown = ", ".join(f"attempt-{a:02d}" for a in attempts)
+                print(f"  --name {report_name}   ({shown})",
+                      file=sys.stderr)
+        else:
+            print("  (none — run `orbit8 lqa run` first)", file=sys.stderr)
+        return 1
+    report = job.store.read(5, name, LQAReport, attempt=attempt)
     split_counts = None
     split_path = (job.store.stage_dir(5, attempt)
                   / f"split_summary.{args.name}.json")

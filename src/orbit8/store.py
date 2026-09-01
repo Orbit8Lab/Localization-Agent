@@ -24,7 +24,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Type, TypeVar
+from typing import Dict, List, Optional, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -62,6 +62,45 @@ class JobStore:
         attempts = [int(m.group(1)) for p in base.iterdir()
                     if (m := re.fullmatch(r"attempt-(\d+)", p.name))]
         return max(attempts) if attempts else None
+
+    def find_attempt(self, stage: int, name: str) -> Optional[int]:
+        """The newest attempt actually holding `name`, or None.
+
+        `latest_attempt` answers a different question — "what ran most
+        recently" — and the two diverge as soon as a stage is run more
+        than once with different artifact names. Stage 5 does exactly
+        that: every `lqa run` opens its own attempt, so auditing four
+        locales leaves four attempts each holding ONE locale's report.
+        Reading the ja report out of the latest attempt then fails with a
+        missing-artifact path, even though the file is right there in an
+        earlier attempt.
+        """
+        base = self.job_dir / f"s{stage}"
+        if not base.exists():
+            return None
+        found = [int(m.group(1)) for p in base.iterdir()
+                 if (m := re.fullmatch(r"attempt-(\d+)", p.name))
+                 and (p / f"{name}.json").exists()]
+        return max(found) if found else None
+
+    def artifact_names(self, stage: int) -> Dict[str, List[int]]:
+        """Every artifact name in a stage → the attempts holding it.
+
+        Exists to make a miss self-explanatory: "missing artifact
+        <path>" tells the operator nothing about which names ARE
+        available, which is the only thing they need to recover.
+        """
+        base = self.job_dir / f"s{stage}"
+        names: Dict[str, List[int]] = {}
+        if not base.exists():
+            return names
+        for attempt_dir in sorted(base.iterdir()):
+            m = re.fullmatch(r"attempt-(\d+)", attempt_dir.name)
+            if not m:
+                continue
+            for artifact in sorted(attempt_dir.glob("*.json")):
+                names.setdefault(artifact.stem, []).append(int(m.group(1)))
+        return names
 
     def new_attempt(self, stage: int) -> int:
         if stage not in VERSIONED_STAGES:
