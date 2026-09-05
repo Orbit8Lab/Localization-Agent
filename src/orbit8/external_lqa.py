@@ -16,6 +16,7 @@ from . import agents
 from .gate_checks import GateConfig
 from .graphs.lqa import LQAConfig, LQAContext, run_lqa_stage
 from .llm import Provider
+from .grouping import derive_groups
 from .memory import RunDB, TranslationMemory
 from .schemas import (Domain, IntakeBrief, LQAReport, UniqueString)
 
@@ -63,10 +64,17 @@ def seed_audit_db(db: RunDB, pairs: List[dict]) -> None:
         by_pair.setdefault(
             (pair["source_text"], pair["target_text"]), []
         ).append(pair["key"])
+    # Conversation grouping for the story axis. Often derives nothing here
+    # — this path exists for GUID-keyed exports — and that is fine: story
+    # batching then falls back to the contiguous slice, exactly as before.
+    groups = derive_groups([p["key"] for p in pairs])
     uniques, targets = [], {}
     for index, ((text, target), keys) in enumerate(by_pair.items()):
         uid = f"u{index:04d}"
-        uniques.append(UniqueString(uid=uid, text=text, keys=keys))
+        group, seq = groups.get(keys[0], (None, None))
+        uniques.append(UniqueString(
+            uid=uid, text=text, keys=keys,
+            group_id=None if group == "_ungrouped" else group, seq=seq))
         targets[uid] = target
     db.seed(uniques)
     for unique in uniques:

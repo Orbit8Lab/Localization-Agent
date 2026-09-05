@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from .grouping import derive_groups, group_stats
 from .schemas import IngestReport, SourceString, UniqueString
 
 
@@ -87,16 +88,33 @@ def ingest_any(path: Path, fallback=None) -> List[SourceString]:
 
 
 def dedup(records: List[SourceString]) -> List[UniqueString]:
-    """Stable synthetic uids; fan-out to game keys only at emission."""
+    """Stable synthetic uids; fan-out to game keys only at emission.
+
+    Each unique string also carries the conversation it came from
+    (``group_id``/``seq``, derived from key structure by grouping.py) so
+    story batching can keep an exchange together. A string appearing in
+    several places keeps its FIRST occurrence's position, which is the one
+    that decides where the exchange it opens begins.
+    """
+    groups = derive_groups([r.key for r in records])
     by_text: Dict[str, List[str]] = {}
     context: Dict[str, str] = {}
+    origin: Dict[str, tuple] = {}
     for record in records:
         by_text.setdefault(record.text, []).append(record.key)
         if record.context and record.text not in context:
             context[record.text] = record.context
-    return [UniqueString(uid=f"u{i:04d}", text=text, keys=keys,
-                         context=context.get(text))
-            for i, (text, keys) in enumerate(by_text.items())]
+        if record.text not in origin:
+            origin[record.text] = groups.get(record.key, (None, None))
+    out = []
+    for i, (text, keys) in enumerate(by_text.items()):
+        group, seq = origin.get(text, (None, None))
+        out.append(UniqueString(
+            uid=f"u{i:04d}", text=text, keys=keys,
+            context=context.get(text),
+            group_id=None if group == "_ungrouped" else group,
+            seq=seq))
+    return out
 
 
 def run_ingest(source_files: List[Path], fallback=None
@@ -116,5 +134,8 @@ def run_ingest(source_files: List[Path], fallback=None
         unique_strings=len(uniques),
         total_chars=sum(len(u.text) for u in uniques),
         dedup_ratio=round(1 - len(uniques) / len(records), 4),
-        per_file=per_file)
+        per_file=per_file,
+        # Grouping that silently produced 400 conversations of one is a
+        # failure that looks like success — so it is reported, not assumed.
+        grouping=group_stats([r.key for r in records]))
     return records, uniques, report

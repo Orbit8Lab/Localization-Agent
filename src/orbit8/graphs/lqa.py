@@ -26,8 +26,10 @@ from ..gate_checks import (GateConfig, locked_in_target, run_gate,
 from ..glossary import Glossary
 from ..llm import Provider
 from ..memory import RunDB, TenantMemory, TranslationMemory
+from ..grouping import plan_similarity_batches, plan_story_batches
 from ..schemas import (BugType, Finding, LQAItem, LQAReport, Severity,
-                       StyleBrief, Verdict, VerdictDecision, VerifiedFinding)
+                       STORY_DOMAIN_VALUES, StyleBrief, Verdict,
+                       VerdictDecision, VerifiedFinding)
 
 
 def _string_type_for(row: dict) -> Optional[str]:
@@ -65,6 +67,11 @@ class LQAConfig:
     # tests/test_skill_docs.py so the two cannot drift again.
     batch_size: int = 20
     batch_size_story: int = 5
+    # How alike two sources must be to share a reviewer call. 0.6 on
+    # character-bigram overlap groups number/placeholder variants of one
+    # string ("+5 HP" / "+10 HP") without dragging in merely
+    # same-topic text.
+    similarity_threshold: float = 0.6
     deterministic_only: bool = False      # T1+T2 only, zero LLM calls
     second_layer: bool = True
     requeue: bool = True                  # flagged strings back to G3 review
@@ -206,7 +213,6 @@ def build_lqa_graph(ctx: LQAContext):
 
     # -------------------------------------------------- T3 semantic (LLM)
 
-    STORY_DOMAINS = {"dialogue", "marketing"}
 
     def tier3(state: LQAState) -> dict:
         flagged = set(state.get("findings_t1", {})) | set(
@@ -220,12 +226,20 @@ def build_lqa_graph(ctx: LQAContext):
         ledger["t3_ran"] = 1
         # Batch policy (docs/skills/lqa-batch-split.md): story n=5,
         # pure strings n=20 — one batch size fits neither.
-        story = [r for r in survivors if r["domain"] in STORY_DOMAINS]
-        strings = [r for r in survivors if r["domain"] not in STORY_DOMAINS]
-        batches: List[List[dict]] = []
-        for rows, size in ((story, cfg.batch_size_story),
-                           (strings, cfg.batch_size)):
-            batches += [rows[i:i + size] for i in range(0, len(rows), size)]
+        story = [r for r in survivors if r["domain"] in STORY_DOMAIN_VALUES]
+        strings = [r for r in survivors
+                   if r["domain"] not in STORY_DOMAIN_VALUES]
+        # TWO axes, because the two classes fail differently. Story is
+        # judged on voice and continuity, so a conversation must arrive
+        # whole. Pure strings fail on INCONSISTENCY — two near-identical
+        # sources rendered differently — which is invisible unless both
+        # land in the same call, and a blind slice almost guarantees they
+        # do not.
+        batches: List[List[dict]] = plan_story_batches(
+            story, max_size=cfg.batch_size_story)
+        batches += plan_similarity_batches(
+            strings, max_size=cfg.batch_size,
+            threshold=cfg.similarity_threshold)
         found: Dict[str, List[Finding]] = {}
         audit: List[dict] = []
         errors: List[dict] = []

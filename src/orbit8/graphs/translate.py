@@ -41,8 +41,10 @@ from ..llm import Provider
 from ..memory import RunDB, TranslationMemory
 from ..observation import (ACCEPTED, FIRST, REJECTED, Observation,
                            ObservationLog, signatures)
+from ..grouping import plan_story_batches
 from ..schemas import (Domain, Finding, MTPE_DOMAINS, MTPEItem, MTPEReason,
-                       Severity, StyleBrief, TranslateRunSummary)
+                       STORY_DOMAINS, Severity, StyleBrief,
+                       TranslateRunSummary)
 
 SEVERITY_WEIGHT = {Severity.HIGH: 100, Severity.MEDIUM: 10, Severity.LOW: 1}
 
@@ -58,6 +60,10 @@ class TranslateConfig:
     locale: str
     kind: str = "production"            # pilot | production
     batch_size: int = 15
+    # Story needs the smaller window for the same reason Tier 3 does
+    # (docs/skills/lqa-batch-split.md): voice and continuity judgments
+    # degrade as the batch grows, while UI labels do not.
+    batch_size_story: int = 5
     max_iterations: int = 2
     critic_mode: str = "flagged"        # off | flagged | all (pilot: all)
     samples: int = 1                    # best-of-N (pilot/high-stakes only)
@@ -161,8 +167,21 @@ def build_translate_graph(ctx: StageContext):
         uids = state["pending"]
         if not uids:
             return {"best": {}}
+        # Send the batch in CONVERSATION order, not pending order, so the
+        # exchange the prompt claims is consecutive actually reads that way.
+        order = {seg["uid"]: (seg.get("seq") if seg.get("seq") is not None
+                              else 0, seg["uid"])
+                 for seg in state["segments"]}
+        uids = sorted(uids, key=lambda u: order.get(u, (0, u)))
         items = [(uid, _text(uid)) for uid in uids]
         domain = Domain(state["segments"][0]["domain"])
+        # Only claim "one conversation" when the batch IS one and enough of
+        # it survived prefill/TM reuse to give the model real context. A
+        # lone leftover line framed as an exchange is a lie the model will
+        # try to honour.
+        groups = {seg.get("group_id") for seg in state["segments"]}
+        conversation = (domain in STORY_DOMAINS and len(groups) == 1
+                        and None not in groups and len(items) > 1)
         brief = _brief_for(uids)
         tm_examples = ctx.tm.examples(cfg.locale) if ctx.tm else None
         best: Dict[str, Candidate] = dict(state.get("best", {}))
@@ -173,7 +192,7 @@ def build_translate_graph(ctx: StageContext):
                 ctx.provider, items, source_lang=cfg.source_lang,
                 target_lang=cfg.locale, game=cfg.game, domain=domain,
                 glossary_brief=brief, style_brief=ctx.style_brief,
-                tm_examples=tm_examples,
+                tm_examples=tm_examples, conversation=conversation,
                 temperature=min(1.0, cfg.temperature + 0.2 * sample))
             for item in translation.items:
                 candidate: Candidate = {"target": item.target_text,
@@ -463,8 +482,18 @@ def run_translate_stage(ctx: StageContext, job_id: str,
     compiled = build_translate_graph(ctx).compile(checkpointer=InMemorySaver())
     batch_no = 0
     for domain, segments in sorted(by_domain.items(), key=lambda kv: kv[0].value):
-        for start in range(0, len(segments), cfg.batch_size):
-            batch = segments[start:start + cfg.batch_size]
+        # Story domains batch by CONVERSATION, not by slice: register,
+        # pronouns and callbacks are decided across a whole exchange, and
+        # a model shown five lines from three scenes cannot keep them
+        # consistent. Everything else keeps the contiguous slice — UI
+        # labels are near-independent, so grouping buys nothing there.
+        if domain in STORY_DOMAINS:
+            batches = plan_story_batches(segments,
+                                         max_size=cfg.batch_size_story)
+        else:
+            batches = [segments[i:i + cfg.batch_size]
+                       for i in range(0, len(segments), cfg.batch_size)]
+        for batch in batches:
             batch_no += 1
             compiled.invoke(
                 {"job_id": job_id, "locale": cfg.locale,

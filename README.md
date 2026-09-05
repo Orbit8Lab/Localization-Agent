@@ -350,6 +350,63 @@ signature of a wrong-locale or wrong-glossary run, and *no glossary
 resolved* explains a suspiciously clean terminology result before you
 believe it.
 
+## Batching — what shares one API call
+
+Batching is not only a cost lever. WHICH strings share a call decides what
+the model can see, so the pipeline groups on three mechanisms, each aimed
+at a different failure.
+
+**Dedup, at ingest.** The same source string appearing in 5 places is
+translated ONCE (`ingest.dedup`); `keys` carries every game key and
+fan-out happens at emission. Five copies cannot drift into five
+renderings, and `IngestReport.dedup_ratio` reports the saving.
+
+**Multi-string calls.** One call carries N strings under one shared prompt
+— glossary brief, style rules and preserve-rules are paid per batch, not
+per string (`agents.translate_batch`).
+
+**Grouping, per class.** Story and UI fail in opposite ways, so they are
+grouped on different axes (`grouping.py`, spec:
+[`docs/skills/lqa-batch-split.md`](docs/skills/lqa-batch-split.md)):
+
+| Class | Size | Axis | The failure it prevents |
+|---|---|---|---|
+| story (`dialogue`, `marketing`) | 5 | **conversation** | a 12-line exchange sliced across 3 calls, each judged without the lines around it |
+| strings (`ui`, `system`, `map`, `item_desc`) | 15 / 20 | **template family** | two near-identical sources rendered differently — invisible unless both are in one call |
+
+`group_id`/`seq` are derived from the game key's own structure
+(`dlg.ch01.scene03.007` → group `dlg.ch01.scene03`, seq 7) across
+`.`/`/`/`:`/`-`/`_`. Conversations are emitted whole and in order; a scene
+larger than the window splits into contiguous stretches, never an
+arbitrary sample; short scenes pack together so one call is not burned per
+two-line exchange. Story batches also tell the translator they are
+consecutive lines of one exchange — but only when the batch really is one
+group and more than one line survived TM reuse.
+
+Pure strings group by **template**
+([`templates.py`](src/orbit8/templates.py), spec:
+[`docs/skills/source-grouping.md`](docs/skills/source-grouping.md)):
+`恢复5点生命` and `恢复10点生命` both reduce to `恢复<NUM>点生命`, so they reach
+one call with no threshold involved — and stay distinct instances rather
+than collapsing. Families pack back up to the window, since most strings
+belong to a family of one.
+
+Templating also emits a **typed difference** for every intra-family
+variation — `CASE`, `FORMAT`, `VAR`, `NUMERIC`, `INFLECTION`, `LEXICAL` —
+rather than a similarity score. A score says two strings are 94% alike; it
+does not say whether they differ by a number, a capital letter, a plural
+suffix or a glossary term, and those four call for four different actions.
+Deliberately stdlib-only: sentence encoders are trained to erase exactly
+the surface distinctions this has to preserve (measured here, an encoder
+rates `恢复5点生命` / `恢复10点生命` at 0.775 where character bigrams give
+1.000).
+
+GUID-keyed exports derive nothing and fall back to the previous contiguous
+slice — as does any job seeded before grouping existed, which migrates
+without losing accepted translations. Grouping is deterministic: batch
+layout rides on every model fingerprint, so two runs must lay out
+identically.
+
 ## Providers
 
 Every agent talks to a model through one narrow protocol (`llm.Provider`:
