@@ -310,43 +310,15 @@ def _cmd_lqa_smoke(args) -> int:
     return 0
 
 
-def _locale_in_name(name: str, locales: List[str]) -> Optional[str]:
-    """The locale a run name refers to, if any.
-
-    Run names are conventionally `lqa-<locale>-<date>`. Matching against
-    the job's OWN locales rather than a locale-shaped regex keeps this
-    from firing on unrelated names, and longest-first stops `zh-Hant`
-    from being read as a bare match when both it and `zh` are configured.
-    """
-    parts = set(re.split(r"[^A-Za-z0-9]+", name))
-    for locale in sorted(locales, key=len, reverse=True):
-        if locale in parts:
-            return locale
-    return None
-
-
-def _jsonl_target_language(path: Path) -> Optional[str]:
-    """The `target_language` a bilingual export declares, from its first
-    usable line. Best-effort: a malformed or absent field is not an error
-    here, it just means there is nothing to cross-check."""
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                lang = json.loads(line).get("target_language")
-                return lang if isinstance(lang, str) and lang else None
-    except (OSError, ValueError):
-        return None
-    return None
-
 
 def _cmd_lqa_report(args) -> int:
     """Client deliverable from a stored LQA report (skill:
     bug-report-builder): xlsx + technical summary, Repair-agent
     suggestions, round-trip safe."""
     import json as json_mod
+    from datetime import date
     from .bug_report import (build_suggestions, load_locations,
+                             locale_in_name, target_language_of,
                              write_bug_report_xlsx, write_tech_summary)
     from .schemas import LQAReport, StyleBrief
     job = Job(Path(args.root), args.job_id)
@@ -409,7 +381,7 @@ def _cmd_lqa_report(args) -> int:
     #    `target_language`; pairing it with another locale's report
     #    produces a bug report whose locations belong to a different file.
     warnings = []
-    named = _locale_in_name(args.name, intake.target_locales)
+    named = locale_in_name(args.name, intake.target_locales)
     if named and named != report.locale:
         warnings.append(
             f"the run is named {args.name!r} but the stored report says "
@@ -418,7 +390,7 @@ def _cmd_lqa_report(args) -> int:
             f"{report.locale} rules and its glossary, so they do not "
             f"describe {named}. Re-run: orbit8 lqa run ... --locale {named}")
     if args.locations_from:
-        loc_lang = _jsonl_target_language(Path(args.locations_from))
+        loc_lang = target_language_of(Path(args.locations_from))
         if loc_lang and loc_lang != report.locale:
             warnings.append(
                 f"--locations-from is a {loc_lang} export but the report "
@@ -433,8 +405,21 @@ def _cmd_lqa_report(args) -> int:
             return 1
 
     slug = intake.game.replace(" ", "")
-    out_dir = (Path(args.out) if args.out
-               else job.store.stage_dir(5, attempt))
+    # Deliverables belong in 30-deliverables, not buried in an s5 attempt
+    # folder. The attempt dir is INTERNAL run state — its name encodes
+    # nothing a client understands, and finding the right one meant
+    # knowing which attempt an audit happened to open. Same layout as
+    # `lqa deliver` (po_patch): a dated subfolder, so successive audits
+    # of the same game sit side by side instead of overwriting.
+    if args.out:
+        out_dir = Path(args.out)
+    elif args.in_place:
+        out_dir = job.store.stage_dir(5, attempt)
+    else:
+        stamp = args.timestamp or date.today().strftime("%Y%m%d")
+        out_dir = (Path(args.root).resolve().parent / "30-deliverables"
+                   / f"{stamp}-lqa-report")
+    out_dir.mkdir(parents=True, exist_ok=True)
     tag = f".{args.tag}" if args.tag else ""
     xlsx = out_dir / f"{slug}_Bug_Report_{report.locale}{tag}.xlsx"
     summary = out_dir / f"{slug}_LQA_Summary_{report.locale}{tag}.md"
@@ -2029,9 +2014,18 @@ def main(argv=None) -> int:
                               "name, the report's stored locale and "
                               "--locations-from disagree")
     lreport.add_argument("--attempt", type=int,
-                         help="s5 attempt (default: latest)")
-    lreport.add_argument("--out", help="output dir (default: the s5 "
-                                       "attempt dir)")
+                         help="s5 attempt (default: the newest one that "
+                              "actually holds --name; each `lqa run` "
+                              "opens its own attempt)")
+    lreport.add_argument("--out",
+                         help="output dir (default: <project>/"
+                              "30-deliverables/<date>-lqa-report/)")
+    lreport.add_argument("--in-place", action="store_true",
+                         help="write beside the artifact in the s5 attempt "
+                              "dir instead of 30-deliverables")
+    lreport.add_argument("--timestamp",
+                         help="YYYYMMDD for the deliverable folder name "
+                              "(default: today)")
     lreport.add_argument("--no-suggestions", action="store_true",
                          help="skip Repair-agent suggested translations "
                               "(zero LLM calls)")

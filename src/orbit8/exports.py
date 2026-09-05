@@ -166,6 +166,35 @@ def emit_bilingual_jsonl(files: List[Path], path: Path, *,
                         identical=identical)
 
 
+# A DOCUMENT extension is the discriminator, not a leading slash: a real
+# UE reference is absolute too ("/Game/UI/WDG_Menu.WDG_Menu_C:...") and
+# must survive. Asset extensions (.uasset, .umap) are not documents.
+_INPUT_FILE = re.compile(r"\.(xlsx|xlsm|xls|csv|tsv|po|pot|json|jsonl|txt|"
+                         r"docx?|ya?ml)$", re.I)
+
+
+def _is_file_path(location: str) -> bool:
+    """True for a location that is really an INPUT FILE path, not a
+    widget/asset reference.
+
+    A generated adapter has no widget information, so some of them fill
+    `location` with the source workbook's own path. That value is
+    identical on every row, tells a developer nothing, and rides into the
+    client bug report's String ID column carrying our internal directory
+    layout:
+
+        u0525 :: /workspace/project/project004-Nomori/10-received/
+                 20260829-drop/Nomori_Yarn (Source).xlsx :: line:04b3c45
+
+    Dropped at the write so every producer is covered. A genuine UE
+    reference is unaffected: it is absolute, so "starts with /" would
+    have discarded exactly the locations this column exists for — the
+    file EXTENSION is what separates a spreadsheet we were handed from an
+    asset path inside the game.
+    """
+    return bool(_INPUT_FILE.search(location.strip()))
+
+
 def _write_pairs(pairs, path: Path, *, source_lang: str, target_lang: str,
                  empty: int, identical: int) -> Tuple[int, int]:
     """Validate a pair set and write it. Shared by the .po path and the
@@ -193,8 +222,8 @@ def _write_pairs(pairs, path: Path, *, source_lang: str, target_lang: str,
             row = {"key": key, "source_language": source_lang,
                    "target_language": target_lang, "source_text": source,
                    "target_text": target}
-            if location:               # UE #: widget/asset path, when known
-                row["location"] = location
+            if location and not _is_file_path(location):
+                row["location"] = location   # UE #: widget/asset path
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     return len(pairs), empty
 

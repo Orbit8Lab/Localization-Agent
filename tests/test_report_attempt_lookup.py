@@ -121,10 +121,14 @@ def test_the_cli_reports_the_available_names(audited, capsys):
 
 
 def test_the_cli_builds_a_report_for_a_non_latest_attempt(audited, capsys):
-    """End to end: the exact command that raised ArtifactError."""
+    """End to end: the exact command that raised ArtifactError.
+
+    `--in-place` keeps the output beside the artifact, which is what makes
+    the attempt number observable; the default now writes to
+    30-deliverables and deliberately does not encode an attempt."""
     from orbit8.cli import main
     code = main(["lqa", "report", str(audited.store.root), "nomori-lqa",
-                 "--name", "lqa-ja", "--no-suggestions"])
+                 "--name", "lqa-ja", "--no-suggestions", "--in-place"])
     assert code == 0
     assert "attempt-02" in capsys.readouterr().out
 
@@ -135,3 +139,128 @@ def test_an_explicit_attempt_still_wins(audited):
     with pytest.raises(Exception):
         main(["lqa", "report", str(audited.store.root), "nomori-lqa",
               "--name", "lqa-ja", "--attempt", "4", "--no-suggestions"])
+
+
+# ------------------------------------------------------ where it is written
+
+def test_the_deliverable_goes_to_30_deliverables(audited):
+    """An s5 attempt folder is INTERNAL run state: its name encodes
+    nothing a client understands, and finding the right one meant knowing
+    which attempt an audit happened to open."""
+    from orbit8.cli import main
+    main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+          "--name", "lqa-ja", "--no-suggestions"])
+    project = audited.store.root.parent
+    assert list((project / "30-deliverables").glob("*/*Bug_Report_ja.xlsx"))
+
+
+def test_the_folder_is_dated_so_audits_do_not_overwrite(audited):
+    """Same layout as `lqa deliver`: successive audits of one game sit
+    side by side rather than clobbering each other."""
+    from datetime import date
+    from orbit8.cli import main
+    main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+          "--name", "lqa-ja", "--no-suggestions"])
+    project = audited.store.root.parent
+    stamp = date.today().strftime("%Y%m%d")
+    assert (project / "30-deliverables" / f"{stamp}-lqa-report").is_dir()
+
+
+def test_the_folder_is_created_when_absent(tmp_path):
+    """A fresh project has no 30-deliverables yet; the tool makes it
+    rather than failing."""
+    from orbit8.cli import main
+    job = Job.init(tmp_path / "proj" / "jobs", "j", intake=INTAKE,
+                   source_files=[])
+    pairs = tmp_path / "ja.jsonl"
+    pairs.write_text(json.dumps(
+        {"key": "a", "source_language": "en", "target_language": "ja",
+         "source_text": "Start", "target_text": "開始"},
+        ensure_ascii=False) + "\n", encoding="utf-8")
+    run_external_lqa(job, None, pairs, name="ja", deterministic_only=True)
+    assert not (tmp_path / "proj" / "30-deliverables").exists()
+    assert main(["lqa", "report", str(tmp_path / "proj" / "jobs"), "j",
+                 "--name", "ja", "--no-suggestions"]) == 0
+    assert (tmp_path / "proj" / "30-deliverables").is_dir()
+
+
+def test_all_locales_share_one_dated_folder(audited):
+    """One folder per audit DATE, not per locale — the client receives the
+    set together."""
+    from orbit8.cli import main
+    for locale in ("ja", "ko"):
+        main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+              "--name", f"lqa-{locale}", "--no-suggestions"])
+    project = audited.store.root.parent
+    folders = list((project / "30-deliverables").iterdir())
+    assert len(folders) == 1
+    names = sorted(p.name for p in folders[0].glob("*Bug_Report*.xlsx"))
+    assert names == ["Nomori_Bug_Report_ja.xlsx",
+                     "Nomori_Bug_Report_ko.xlsx"]
+
+
+def test_in_place_still_writes_beside_the_artifact(audited):
+    """The old behaviour stays reachable for an internal rebuild."""
+    from orbit8.cli import main
+    main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+          "--name", "lqa-ja", "--no-suggestions", "--in-place"])
+    attempt = audited.store.find_attempt(5, "lqa_report.lqa-ja")
+    assert list(audited.store.stage_dir(5, attempt).glob("*.xlsx"))
+    assert not (audited.store.root.parent / "30-deliverables").exists()
+
+
+def test_an_explicit_out_still_wins(audited, tmp_path):
+    from orbit8.cli import main
+    out = tmp_path / "elsewhere"
+    main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+          "--name", "lqa-ja", "--no-suggestions", "--out", str(out)])
+    assert list(out.glob("*Bug_Report_ja.xlsx"))
+
+
+def test_the_timestamp_can_be_pinned(audited):
+    """A re-delivery must be able to land in the original dated folder."""
+    from orbit8.cli import main
+    main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+          "--name", "lqa-ja", "--no-suggestions",
+          "--timestamp", "20260830"])
+    project = audited.store.root.parent
+    assert (project / "30-deliverables" / "20260830-lqa-report"
+            / "Nomori_Bug_Report_ja.xlsx").exists()
+
+
+def test_the_summary_lands_beside_the_xlsx(audited):
+    """The tech summary is part of the same deliverable."""
+    from orbit8.cli import main
+    main(["lqa", "report", str(audited.store.root), "nomori-lqa",
+          "--name", "lqa-ja", "--no-suggestions"])
+    project = audited.store.root.parent
+    folder = next((project / "30-deliverables").iterdir())
+    assert (folder / "Nomori_LQA_Summary_ja.xlsx".replace(".xlsx", ".md")
+            ).exists()
+
+
+# ------------------------------------------------ concurrent attempts
+
+def test_two_callers_never_claim_the_same_attempt(tmp_path):
+    """`new_attempt` was read-then-create with exist_ok=True, so two
+    processes could compute the same number and both "succeed" — the
+    second then wrote its report into the first's directory. Auditing
+    four locales in parallel is the obvious way to use this tool, and it
+    would have silently lost a locale's findings."""
+    from concurrent.futures import ThreadPoolExecutor
+    job = Job.init(tmp_path / "jobs", "j", intake=INTAKE, source_files=[])
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claimed = list(pool.map(lambda _: job.store.new_attempt(5),
+                                range(8)))
+    assert len(set(claimed)) == 8, f"duplicate attempts: {sorted(claimed)}"
+
+
+def test_a_claimed_attempt_directory_exists(tmp_path):
+    job = Job.init(tmp_path / "jobs", "j", intake=INTAKE, source_files=[])
+    n = job.store.new_attempt(5)
+    assert job.store.stage_dir(5, n).is_dir()
+
+
+def test_attempts_stay_sequential_when_uncontended(tmp_path):
+    job = Job.init(tmp_path / "jobs", "j", intake=INTAKE, source_files=[])
+    assert [job.store.new_attempt(5) for _ in range(3)] == [1, 2, 3]

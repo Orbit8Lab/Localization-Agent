@@ -247,6 +247,22 @@ locales overwrite earlier ones. "locale" names the language being \
 audited and must match the pairs file, which the audit refuses to \
 review under any other language's glossary and rules; omit it and the \
 pairs file's own target_language decides.
+- {"tool": "lqa_report", "args": {"name": "<audit name from lqa_run>", \
+"locations_from": "<optional bilingual .jsonl/.po for String IDs>", \
+"no_suggestions": false, "timestamp": "<optional YYYYMMDD>", \
+"tag": "<optional filename suffix>"}} — build the CLIENT DELIVERABLE \
+from a stored audit: a bug-report xlsx plus a technical summary, written \
+to 30-deliverables/<date>-lqa-report/. This is the step AFTER lqa_run; \
+"name" must match the name that run used, and calling it with no name \
+lists the audits available. "locations_from" should be the SAME \
+locale's bilingual file as the audit. Leave "no_suggestions" false to \
+have the Repair agent propose glossary-checked corrections (costs LLM \
+calls); true skips it, and the reviewer's own fixes still fill the \
+column. If the result comes back "refused", the audit's stored locale \
+disagrees with its name or with locations_from — report the warnings \
+VERBATIM and STOP; never pass force:true on your own initiative, \
+because a mislabelled bug report cannot be recalled once the client has \
+it.
 - {"tool": "scan_po", "args": {"po": "<translated bilingual .po>", \
 "glossary": "<optional — defaults to the project's active termbase>", \
 "out_dir": "<work folder>", "game": "<name>", \
@@ -1016,6 +1032,137 @@ class ChatOrchestrator:
                 + " It is already at the per-locale path the pipeline "
                   "resolves; no promote step is needed.")}, ensure_ascii=False)
 
+    def _t_lqa_report(self, args: dict) -> str:
+        """Build the client deliverable from a stored LQA report.
+
+        The audit was reachable from chat and the deliverable was not, so
+        every run ended with the operator dropping to a shell — which is
+        also where the locale and attempt mistakes happened, because the
+        CLI's guard rails were the only ones and they were easy to skip
+        past with --force.
+
+        Same rules as `orbit8 lqa report`: the report is found by NAME
+        across attempts, a locale disagreement is refused rather than
+        shipped, and the xlsx lands in 30-deliverables/<date>-lqa-report/.
+        """
+        import json as json_mod
+        from datetime import date
+
+        from .bug_report import (build_suggestions, load_locations,
+                                 locale_in_name, target_language_of,
+                                 write_bug_report_xlsx, write_tech_summary)
+        from .schemas import LQAReport
+
+        name = str(args.get("name") or "")
+        if not name:
+            return ("error: which audit? pass \"name\" — "
+                    + self._known_report_names())
+        artifact = f"lqa_report.{name}"
+        attempt = self.job.store.find_attempt(5, artifact)
+        if attempt is None:
+            return (f"error: no LQA report named {name!r}. "
+                    + self._known_report_names())
+        report = self.job.store.read(5, artifact, LQAReport,
+                                     attempt=attempt)
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+
+        # Refuse a mislabelled deliverable. The client already has the
+        # file by the time anyone notices, so this is the one place where
+        # stopping beats shipping.
+        warnings = []
+        named = locale_in_name(name, intake.target_locales)
+        if named and named != report.locale:
+            warnings.append(
+                f"the audit is named {name!r} but its stored locale is "
+                f"{report.locale!r}: it was SCORED against {report.locale} "
+                f"rules, so its findings do not describe {named}")
+        locations = None
+        if args.get("locations_from"):
+            loc_path = self._confine_read(str(args["locations_from"]))
+            if not loc_path.exists():
+                return f"error: no locations file at {loc_path}"
+            loc_lang = target_language_of(loc_path)
+            if loc_lang and loc_lang != report.locale:
+                warnings.append(
+                    f"locations_from is a {loc_lang} export but the report "
+                    f"is {report.locale}")
+            locations = load_locations(loc_path)
+        if warnings and not args.get("force"):
+            return json.dumps(
+                {"status": "refused", "name": name,
+                 "report_locale": report.locale, "warnings": warnings,
+                 "advice": "Tell the operator VERBATIM and stop. A "
+                           "mislabelled bug report cannot be recalled. "
+                           "Re-run the audit with the right --locale, or "
+                           "pass force:true only if the operator "
+                           "explicitly confirms the stored locale is "
+                           "correct."}, ensure_ascii=False)
+
+        suggestions = {}
+        if not args.get("no_suggestions") and not self.dry_run:
+            suggestions = build_suggestions(
+                self.provider, report.items, game=intake.game,
+                source_lang=intake.source_lang, locale=report.locale,
+                glossary=self.job._glossary(report.locale),
+                style_brief=self.job._style_or_none())
+
+        project_root = self.job.store.root.resolve().parent
+        if args.get("out_dir"):
+            # `_confine` RAISES on an escape; every other tool turns that
+            # into a message the model can act on rather than a traceback.
+            try:
+                out_dir = self._confine(str(args["out_dir"]))
+            except Exception as err:
+                return f"error: {err}"
+        else:
+            stamp = str(args.get("timestamp")
+                        or date.today().strftime("%Y%m%d"))
+            out_dir = (project_root / "30-deliverables"
+                       / f"{stamp}-lqa-report")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        slug = intake.game.replace(" ", "")
+        tag = f".{args['tag']}" if args.get("tag") else ""
+        xlsx = out_dir / f"{slug}_Bug_Report_{report.locale}{tag}.xlsx"
+        summary = out_dir / f"{slug}_LQA_Summary_{report.locale}{tag}.md"
+        split_path = (self.job.store.stage_dir(5, attempt)
+                      / f"split_summary.{name}.json")
+        split_counts = (json_mod.loads(
+            split_path.read_text(encoding="utf-8"))["split"]
+            if split_path.exists() else None)
+        count = write_bug_report_xlsx(
+            report, xlsx, suggestions=suggestions, game=intake.game,
+            locations=locations)
+        write_tech_summary(report, summary, game=intake.game,
+                           split_counts=split_counts,
+                           suggestions_count=len(suggestions))
+        # Count what the workbook actually carries, not what the Repair
+        # agent returned: the reviewer's own suggested_fix fills the
+        # column too, and reporting only the agent's total made a useful
+        # report look empty.
+        reviewer_fixes = sum(
+            1 for item in report.items for vf in item.findings
+            if vf.finding.suggested_fix and item.uid not in suggestions)
+        return json.dumps({
+            "status": "complete", "name": name, "locale": report.locale,
+            "attempt": attempt, "bug_rows": count,
+            "repair_agent_suggestions": len(suggestions),
+            "reviewer_suggestions": reviewer_fixes,
+            "block_ship": report.block_ship,
+            "by_severity": report.by_severity,
+            "xlsx": str(xlsx), "summary": str(summary),
+            "warnings": warnings}, ensure_ascii=False)
+
+    def _known_report_names(self) -> str:
+        """Available audit names — the only thing that makes a wrong
+        `name` recoverable without leaving chat."""
+        names = self.job.store.artifact_names(5)
+        found = sorted(n.split("lqa_report.", 1)[1] for n in names
+                       if n.startswith("lqa_report."))
+        if not found:
+            return "no audits have been run yet (use lqa_run first)"
+        return "available: " + ", ".join(found)
+
     def _t_lqa_smoke(self, args: dict) -> str:
         """Pre-flight an audit before spending a batch on it.
 
@@ -1309,6 +1456,7 @@ class ChatOrchestrator:
                 "translate_po": self._t_translate_po,
                 "scan_po": self._t_scan_po,
                 "lqa_smoke": self._t_lqa_smoke,
+                "lqa_report": self._t_lqa_report,
                 "lqa_run": self._t_lqa_run,
                 "glossary_from_sheet":
                     self._t_glossary_from_sheet}

@@ -92,13 +92,30 @@ class Glossary:
         return entry.translation if entry else None
 
     def brief_for(self, texts: List[str]) -> GlossaryBrief:
-        """Per-batch slice: only terms matched in the batch source,
-        longest-match-first so compound terms surface before their parts."""
-        matched: List[TermBrief] = []
-        for entry in sorted(self.terms.values(),
-                            key=lambda t: len(t.term), reverse=True):
-            if any(term_in_text(entry.term, text) for text in texts):
-                matched.append(entry)
+        """Per-batch slice: only the terms a batch is actually subject to.
+
+        Nested entries are resolved by longest match, the same rule the
+        deterministic gate applies (`gate_checks.applicable_terms`), so
+        the prompt and the gate cannot disagree about which term governs
+        a span. Sorting alone was not enough: a sentence containing
+        "Autumn Spirit Guardian" used to show the model SIX renderings —
+        'Autumn Spirit Guardian', 'Spirit Guardian', 'Guardian' and
+        'spirit' among them — four of which do not apply, inviting the
+        translator to use 灵体 inside 秋之守护灵 and the reviewer to file a
+        terminology defect when it is absent.
+
+        A shorter term still appears when it occurs somewhere the longer
+        one does not cover, because there it genuinely applies.
+        """
+        from .gate_checks import applicable_terms
+        renderings = {t.term: t.translation for t in self.terms.values()}
+        governing: set = set()
+        for text in texts:
+            governing |= set(applicable_terms(text, renderings))
+        matched = [entry for entry in sorted(self.terms.values(),
+                                             key=lambda t: len(t.term),
+                                             reverse=True)
+                   if entry.term in governing]
         return GlossaryBrief(game=self.game, locale=self.locale,
                              asset_version=self.asset_version, terms=matched)
 

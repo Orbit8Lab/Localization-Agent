@@ -18,6 +18,8 @@ is the source of truth). The load-bearing rules:
 """
 from __future__ import annotations
 
+import json
+import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -59,6 +61,10 @@ HEADERS = ["Bug#", "Date Reported", "Category - Summary", "Description",
            "Dev Feedback", "Assigned To", "Last Updated", "Orbit8 Comment"]
 HUMAN_COLUMNS = ["Status", "Dev Feedback", "Assigned To", "Last Updated",
                  "Orbit8 Comment"]
+# Marks a suggestion taken from the reviewer's own `suggested_fix`
+# rather than produced and re-gated by the Repair agent.
+REVIEWER_FIX_NOTE = ("Reviewer-proposed fix (not glossary-verified) "
+                     "— confirm terminology before applying")
 
 AUTO_NOTE = "AUTO: "
 CODE_TOKEN_NOTE = (AUTO_NOTE + "source looks like a code/name token — "
@@ -174,6 +180,37 @@ def build_suggestions(provider: Optional[Provider], items: List[LQAItem], *,
     return suggestions
 
 
+def locale_in_name(name: str, locales: List[str]) -> Optional[str]:
+    """The locale a run name refers to, if any.
+
+    Run names are conventionally `lqa-<locale>-<date>`. Matching against
+    the job's OWN locales rather than a locale-shaped regex keeps this
+    from firing on unrelated names, and longest-first stops `zh-Hant`
+    from being read as a bare match when both it and `zh` are configured.
+    """
+    parts = set(re.split(r"[^A-Za-z0-9]+", name))
+    for locale in sorted(locales, key=len, reverse=True):
+        if locale in parts:
+            return locale
+    return None
+
+
+def target_language_of(path: Path) -> Optional[str]:
+    """The `target_language` a bilingual export declares, from its first
+    usable line. Best-effort: a malformed or absent field is not an error
+    here, it just means there is nothing to cross-check."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                lang = json.loads(line).get("target_language")
+                return lang if isinstance(lang, str) and lang else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def load_locations(path: Path) -> Dict[str, str]:
     """key -> location map for _location, from a .po (UE ``#:`` reference
     comments) or a bilingual pairs .jsonl carrying a ``location`` field."""
@@ -259,8 +296,29 @@ def write_bug_report_xlsx(report: LQAReport, path: Path, *,
             finding = vf.finding
             severity = SEVERITY_LABELS[finding.severity]
             token = finding.bug_type.value
+            # Two sources, in precedence order.
+            #
+            # 1. The Repair agent (`suggestions`), when it ran. Those are
+            #    re-gated against the glossary and style rules before
+            #    shipping, so they are the stronger claim.
+            # 2. The reviewer's own `suggested_fix`, already sitting in
+            #    the report JSON. Only the first was ever read, so a
+            #    report built with --no-suggestions shipped an EMPTY
+            #    Expected Result column while dozens of usable fixes sat
+            #    unread in the artifact — the client then gets a defect
+            #    list with no proposed corrections at all.
+            #
+            # The fallback is per-FINDING, not per-item: `suggestions` is
+            # keyed by uid and rewrites the whole string, while
+            # `suggested_fix` addresses this one defect.
             suggestion = suggestions.get(item.uid, "")
             comment = ""
+            if not suggestion and finding.suggested_fix:
+                suggestion = finding.suggested_fix
+                # Say where it came from. A reviewer-proposed fix has NOT
+                # been re-gated against the glossary, so it must not be
+                # mistaken for a verified repair.
+                comment = REVIEWER_FIX_NOTE
             if not suggestion and suggestion_exempt(item):
                 comment = CODE_TOKEN_NOTE
             description = f"{finding.message} [{token}]"

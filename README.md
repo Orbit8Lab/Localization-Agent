@@ -259,7 +259,7 @@ example-project/            ← chat file tools confined here
 ├── 10-received/            ← client drops; `orbit8 new` searches here
 │   └── 20260828-drop/
 ├── 20-work/
-├── 30-deliverables/
+├── 30-deliverables/        ← `lqa report` writes <date>-lqa-report/ here
 ├── 40-reference/           ← promoted glossary + style guides
 └── jobs/                   ← created by job init / orbit8 new
 ```
@@ -283,13 +283,41 @@ uv run orbit8 status jobs demo-ko
 # $DEEPSEEK_API (auto-loaded from .ENV outside the repo, or $ORBIT8_ENV)
 uv run orbit8 next jobs demo-ko
 
-uv run pytest    # 698 tests incl. full INTAKE→RELEASE dry-run, sandbox,
+uv run pytest    # 742 tests incl. full INTAKE→RELEASE dry-run, sandbox,
                  # codegen retry loop, chat orchestrator, context assembly,
                  # .po format fidelity and display-width budgets
 ```
 
 `--dry-run` needs no API key at all, so the whole Controller / gate /
 artifact model is explorable before any spend.
+
+### Building the client bug report
+
+```bash
+uv run orbit8 lqa report jobs demo-ko --name lqa-ja-20260901 \
+    --locations-from 20-work/pairs_en-ja.jsonl
+```
+
+`--name` selects the stored audit; each `orbit8 lqa run` opens its own s5
+attempt, so the report is found by NAME rather than by guessing at the
+newest attempt. Pass a name that does not exist and the command lists the
+ones that do.
+
+The xlsx and the tech summary land in
+`30-deliverables/<YYYYMMDD>-lqa-report/` — one dated folder per audit, all
+locales together, matching the `lqa deliver` layout. `--in-place` keeps
+them beside the artifact instead, `--out` picks any directory, and
+`--timestamp` pins the folder name for a re-delivery.
+
+The Expected Result column is filled from the Repair agent when it runs
+(`--no-suggestions` skips it, and needs no API key); where it did not, the
+T3 reviewer's own `suggested_fix` from the report is used instead and
+marked as not glossary-verified in the Orbit8 Comment column.
+
+Locale mistakes are refused rather than shipped: if the run name, the
+report's stored locale and `--locations-from` disagree, the command
+explains and exits 1 (`--force` overrides). A mislabelled deliverable is
+worse than a missing one, because the client already has it.
 
 ### Smoke test before a large batch
 

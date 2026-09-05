@@ -100,3 +100,44 @@ def test_timeout_is_configured_and_overridable(monkeypatch):
     assert default.timeout == llm.DEFAULT_TIMEOUT == 120
     custom = OpenAICompatProvider("deepseek", timeout=30, max_retries=1)
     assert custom.timeout == 30 and custom.max_retries == 1
+
+
+def test_a_stalled_call_does_not_block_interpreter_exit():
+    """`_with_deadline` used a ThreadPoolExecutor, which registers an
+    atexit hook that JOINS every worker it created — and
+    `shutdown(wait=False)` does not exempt them. A call stuck in
+    `_ssl__SSLSocket_read` therefore survived the deadline (the retry
+    proceeded correctly) and then blocked interpreter EXIT with no
+    timeout of its own.
+
+    Observed on a real audit: the cascade finished, the report was never
+    written, and the process sat over three hours at ~0 CPU with two
+    abandoned SSL reads pinned open. The deadline worked; the exit did
+    not.
+
+    Run in a SUBPROCESS because that is the only place the atexit
+    behaviour is observable.
+    """
+    import subprocess
+    import sys
+    import textwrap
+    import time
+
+    code = textwrap.dedent("""
+        import time
+        from orbit8.llm import OpenAICompatProvider
+        provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+        provider.name, provider.model, provider.timeout = "t", "m", 1.0
+        try:
+            provider._with_deadline(lambda: time.sleep(60))
+        except Exception:
+            pass
+        print("done")
+    """)
+    started = time.time()
+    result = subprocess.run([sys.executable, "-c", code],
+                            capture_output=True, text=True, timeout=45)
+    elapsed = time.time() - started
+    assert "done" in result.stdout
+    # The abandoned worker sleeps 60s; exiting must not wait for it.
+    assert elapsed < 20, f"interpreter waited {elapsed:.0f}s on a dead call"

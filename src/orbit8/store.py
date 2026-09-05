@@ -103,12 +103,29 @@ class JobStore:
         return names
 
     def new_attempt(self, stage: int) -> int:
+        """Claim the next attempt number for a stage.
+
+        `exist_ok=True` made this read-then-create, so two processes
+        could compute the same `n` and both "succeed" — the second then
+        wrote its report into the first's directory. Auditing four
+        locales in parallel is the obvious way to use this tool, and it
+        would have silently lost a locale's findings.
+
+        Creating the directory EXCLUSIVELY makes the claim atomic: the
+        loser of a race gets FileExistsError and retries with the next
+        number, so concurrent callers get distinct attempts.
+        """
         if stage not in VERSIONED_STAGES:
             raise ArtifactError(f"stage {stage} is not attempt-versioned")
+        base = self.job_dir / f"s{stage}"
+        base.mkdir(parents=True, exist_ok=True)
         n = (self.latest_attempt(stage) or 0) + 1
-        (self.job_dir / f"s{stage}" / f"attempt-{n:02d}").mkdir(
-            parents=True, exist_ok=True)
-        return n
+        while True:
+            try:
+                (base / f"attempt-{n:02d}").mkdir()
+                return n
+            except FileExistsError:
+                n += 1
 
     # ------------------------------------------------------------- write
 

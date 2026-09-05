@@ -1121,8 +1121,8 @@ def test_a_report_builds_without_a_style_brief(tmp_path):
     assert main(["lqa", "report", str(project / "jobs"), "j",
                  "--name", "a", "--no-suggestions"]) == 0
 
-    attempt = job.store.stage_dir(5, job.store.latest_attempt(5))
-    assert list(attempt.glob("*Bug_Report*.xlsx"))
+    # The deliverable lands in 30-deliverables, not the s5 attempt dir.
+    assert list((project / "30-deliverables").glob("*/*Bug_Report*.xlsx"))
 
 
 # ------------------------- dedup must not fabricate source/target pairs
