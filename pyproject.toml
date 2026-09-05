@@ -13,6 +13,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Anthropic speaks its own wire protocol rather than the OpenAI-compatible
+# one every other provider shares, so it needs its own SDK. Optional: the
+# import is lazy and no other provider depends on it.
+anthropic = ["anthropic>=0.40"]
 
 [project.scripts]
 orbit8 = "orbit8.cli:main"

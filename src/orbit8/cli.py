@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from .controller import GATES, GATE_NAMES, Job, Stage
-from .llm import OpenAICompatProvider, PROVIDER_PRESETS
+from .llm import build_provider, PROVIDER_NAMES
 from .schemas import IntakeBrief, SourceBatch
 
 
@@ -68,7 +68,7 @@ def _cmd_smoke(args) -> int:
     job = Job(Path(args.root), args.job_id)
     factory = None
     if not args.dry_run:
-        factory = lambda locale: OpenAICompatProvider(
+        factory = lambda locale: build_provider(
             args.provider, model=args.model, api_key=args.api_key)
     try:
         results = job.smoke(factory, size=args.size,
@@ -123,7 +123,7 @@ def _cmd_next(args) -> int:
     job = Job(Path(args.root), args.job_id)
     factory = None
     if not args.dry_run:
-        factory = lambda locale: OpenAICompatProvider(
+        factory = lambda locale: build_provider(
             args.provider, model=args.model, api_key=args.api_key)
     before = job.derive()
     acted = job.next_step(factory, dry_run=args.dry_run)
@@ -160,7 +160,7 @@ def _cmd_glossary_import(args) -> int:
     job = Job(Path(args.root), args.job_id)
     intake = job.store.read(0, "intake", IntakeBrief)
     locale = args.locale or intake.target_locales[0]
-    provider = OpenAICompatProvider(args.provider, model=args.model,
+    provider = build_provider(args.provider, model=args.model,
                                     api_key=args.api_key)
 
     class _Cache:
@@ -221,7 +221,7 @@ def _cmd_lqa_run(args) -> int:
     from .external_lqa import LocaleConflict, run_external_lqa
     job = Job(Path(args.root), args.job_id)
     provider = (None if args.deterministic_only else
-                OpenAICompatProvider(args.provider, model=args.model,
+                build_provider(args.provider, model=args.model,
                                      api_key=args.api_key))
     try:
         report = run_external_lqa(
@@ -270,7 +270,7 @@ def _cmd_lqa_smoke(args) -> int:
     from .external_lqa import smoke_audit
     job = Job(Path(args.root), args.job_id)
     provider = (None if args.deterministic_only else
-                OpenAICompatProvider(args.provider, model=args.model,
+                build_provider(args.provider, model=args.model,
                                      api_key=args.api_key))
     r = smoke_audit(job, provider, Path(args.pairs), size=args.size,
                     locale=args.locale)
@@ -353,7 +353,7 @@ def _cmd_lqa_report(args) -> int:
 
     suggestions = {}
     if not args.no_suggestions:
-        provider = OpenAICompatProvider(args.provider, model=args.model,
+        provider = build_provider(args.provider, model=args.model,
                                         api_key=args.api_key)
         suggestions = build_suggestions(
             provider, report.items, game=intake.game,
@@ -557,9 +557,9 @@ def _cmd_glossary_extract(args) -> int:
         decisions.append(TermDecision(zh=zh.strip(), en=en.strip()))
     provider = None
     if args.provider != "none":
-        from .llm import OpenAICompatProvider, autoload_env
+        from .llm import build_provider, autoload_env
         autoload_env()
-        provider = OpenAICompatProvider(args.provider, model=args.model,
+        provider = build_provider(args.provider, model=args.model,
                                         api_key=args.api_key)
     result = extract_glossary(
         [Path(p) for p in args.po], decisions, provider=provider,
@@ -585,7 +585,7 @@ def _cmd_po_translate(args) -> int:
     """Translate the untranslated strings of a received bilingual .po,
     glossary-constrained, into a work-product folder (patched copy +
     MTPE form + report). Not a delivery."""
-    from .llm import OpenAICompatProvider, autoload_env
+    from .llm import build_provider, autoload_env
     from .po_translate import translate_untranslated
     from .project_paths import resolve_glossary
     glossary, notes = resolve_glossary(
@@ -599,7 +599,7 @@ def _cmd_po_translate(args) -> int:
         return 2
     print(f"glossary:   {glossary}")
     autoload_env()
-    provider = OpenAICompatProvider(args.provider, model=args.model,
+    provider = build_provider(args.provider, model=args.model,
                                     api_key=args.api_key)
     run = translate_untranslated(
         Path(args.po), glossary, Path(args.out),
@@ -676,9 +676,9 @@ def _cmd_po_scan(args) -> int:
         print(note)
     provider = None
     if not args.deterministic_only:
-        from .llm import OpenAICompatProvider, autoload_env
+        from .llm import build_provider, autoload_env
         autoload_env()
-        provider = OpenAICompatProvider(
+        provider = build_provider(
             args.provider, model=args.model, api_key=args.api_key,
             timeout=args.timeout, max_retries=args.retries,
             on_retry=lambda attempt, msg: print(
@@ -874,9 +874,9 @@ def _cmd_classify(args) -> int:
                for k, zh, _en, loc in read_po_entries(Path(args.po)) if k]
     provider = None
     if args.llm:
-        from .llm import OpenAICompatProvider, autoload_env
+        from .llm import build_provider, autoload_env
         autoload_env()
-        provider = OpenAICompatProvider(args.provider, model=args.model,
+        provider = build_provider(args.provider, model=args.model,
                                         api_key=args.api_key)
     labels = classify_batch(
         entries, provider=provider,
@@ -1170,7 +1170,7 @@ def _cmd_analyze(args) -> int:
     from .analysis import analyze_corpus, labels_from_run_dbs
     from .ingest import ingest_any
     job = Job(Path(args.root), args.job_id)
-    provider = (OpenAICompatProvider(args.provider, model=args.model,
+    provider = (build_provider(args.provider, model=args.model,
                                      api_key=args.api_key)
                 if args.classify else None)
     records = []
@@ -1196,11 +1196,33 @@ def _cmd_analyze(args) -> int:
     return 0
 
 
+def resolve_work_provider(args) -> tuple:
+    """Which (provider, model, api_key) the stage steps and tools use.
+
+    Split out of `_cmd_chat` so the rule has ONE definition and the tests
+    exercise the real thing rather than a copy that can drift from it.
+
+    Two rules, both about not silently sending the wrong thing to the
+    wrong vendor: `--model` qualifies `--provider`, so it does not travel
+    to a different work provider; and an explicit `--api-key` is one
+    vendor's secret, so it is never forwarded to another.
+    """
+    work_provider = args.work_provider or args.provider
+    work_model = (args.work_model if args.work_provider
+                  else (args.work_model or args.model))
+    work_key = args.api_key if work_provider == args.provider else None
+    return work_provider, work_model, work_key
+
+
 CHAT_HELP = """\
 commands:
   /debug          toggle verbose mode (tool args + result preview live)
   /last [n]       replay the last n tool calls of this session (default 1)
   /trace          where the full JSONL trace of this session is written
+  /model          show what stage steps and tools run on
+  /model <provider> [model]
+                  switch the model used by stage steps and tools
+                  (the chat agent's own model stays fixed for the session)
   /help           this list
   exit            leave the session
 Everything else is sent to the agent."""
@@ -1351,7 +1373,7 @@ def _cmd_new(args) -> int:
         print("nothing to propose from", file=sys.stderr)
         return 2
 
-    provider = OpenAICompatProvider(args.provider, model=args.model,
+    provider = build_provider(args.provider, model=args.model,
                                     api_key=args.api_key)
     print("proposing intake…")
     result = propose_intake(provider, description,
@@ -1508,10 +1530,15 @@ def _cmd_chat(args) -> int:
             print(f"Jobs under {args.root}: {', '.join(existing)}",
                   file=sys.stderr)
         return 2
-    provider = OpenAICompatProvider(args.provider, model=args.model,
+    provider = build_provider(args.provider, model=args.model,
                                     api_key=args.api_key)
-    factory = lambda locale: OpenAICompatProvider(
-        args.provider, model=args.model, api_key=args.api_key)
+    # The agent's own reasoning and the language work it drives are
+    # different jobs with different economics: routing tool calls is cheap
+    # and frequent, translating a batch is neither. `--work-provider`
+    # defaults to `--provider`, so the single-provider case is unchanged.
+    work_provider, work_model, work_key = resolve_work_provider(args)
+    factory = lambda locale: build_provider(
+        work_provider, model=work_model, api_key=work_key)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     trace_path = (Path(args.trace) if args.trace
                   else job.store.job_dir / "chat-traces"
@@ -1574,6 +1601,35 @@ def _cmd_chat(args) -> int:
         if message.lower() == "/trace":
             calls = [r for r in chat.trace if r["event"] == "tool"]
             print(f"{trace_path}\n{len(calls)} tool calls this session")
+            continue
+        if message.lower().startswith("/model"):
+            parts = message.split()
+            if len(parts) == 1:
+                print(f"stage/tool model: {chat.work_model()}")
+                print(f"chat agent model: {provider.name}/{provider.model}"
+                      f"  (fixed for this session)")
+                continue
+            name = parts[1]
+            if name not in PROVIDER_NAMES:
+                print(f"unknown provider {name!r}; "
+                      f"choose from {', '.join(PROVIDER_NAMES)}")
+                continue
+            chosen = parts[2] if len(parts) > 2 else None
+            # Build ONE provider now, so a bad model id or a missing key
+            # fails here rather than hours into the next batch.
+            # Same rule as at startup: an explicit --api-key belongs to
+            # --provider only, never to a vendor switched in later.
+            key = args.api_key if name == args.provider else None
+            try:
+                build_provider(name, model=chosen, api_key=key)
+            except Exception as err:
+                print(f"✗ {type(err).__name__}: {err}")
+                continue
+            before = chat.work_model()
+            after = chat.set_work_model(
+                lambda locale, _n=name, _m=chosen, _k=key: build_provider(
+                    _n, model=_m, api_key=_k))
+            print(f"stage/tool model: {before} → {after}")
             continue
         if message.lower().startswith("/last"):
             parts = message.split()
@@ -1850,7 +1906,7 @@ def main(argv=None) -> int:
     new.add_argument("--tenant", default="default")
     new.add_argument("--pilot-size", type=int, default=30)
     new.add_argument("--provider", default="deepseek",
-                     choices=sorted(PROVIDER_PRESETS))
+                     choices=PROVIDER_NAMES)
     new.add_argument("--model")
     new.add_argument("--api-key")
     new.set_defaults(func=_cmd_new)
@@ -1909,7 +1965,7 @@ def main(argv=None) -> int:
                        help="comma-separated subset (default: all job "
                             "target locales)")
     smoke.add_argument("--provider", default="deepseek",
-                       choices=sorted(PROVIDER_PRESETS))
+                       choices=PROVIDER_NAMES)
     smoke.add_argument("--model")
     smoke.add_argument("--api-key")
     smoke.add_argument("--dry-run", action="store_true",
@@ -1922,7 +1978,7 @@ def main(argv=None) -> int:
     nxt.add_argument("root")
     nxt.add_argument("job_id")
     nxt.add_argument("--provider", default="deepseek",
-                     choices=sorted(PROVIDER_PRESETS))
+                     choices=PROVIDER_NAMES)
     nxt.add_argument("--model")
     nxt.add_argument("--api-key")
     nxt.add_argument("--dry-run", action="store_true",
@@ -1947,7 +2003,7 @@ def main(argv=None) -> int:
                          help="LLM-classify strings not labeled by any "
                               "earlier run")
     analyze.add_argument("--provider", default="deepseek",
-                         choices=sorted(PROVIDER_PRESETS))
+                         choices=PROVIDER_NAMES)
     analyze.add_argument("--model")
     analyze.add_argument("--api-key")
     analyze.set_defaults(func=_cmd_analyze)
@@ -1977,7 +2033,7 @@ def main(argv=None) -> int:
                       help="T1+T2 only; zero LLM calls (skips content "
                            "classification)")
     lrun.add_argument("--provider", default="deepseek",
-                      choices=sorted(PROVIDER_PRESETS))
+                      choices=PROVIDER_NAMES)
     lrun.add_argument("--model")
     lrun.add_argument("--api-key")
     lrun.set_defaults(func=_cmd_lqa_run)
@@ -1996,7 +2052,7 @@ def main(argv=None) -> int:
                         help="T1+T2 only; checks config, NOT the reviewer "
                              "prompt")
     lsmoke.add_argument("--provider", default="deepseek",
-                        choices=sorted(PROVIDER_PRESETS))
+                        choices=PROVIDER_NAMES)
     lsmoke.add_argument("--model")
     lsmoke.add_argument("--api-key")
     lsmoke.set_defaults(func=_cmd_lqa_smoke)
@@ -2035,7 +2091,7 @@ def main(argv=None) -> int:
                          help="suffix for the output filenames, e.g. "
                               "--tag v2 → …_Bug_Report_<locale>.v2.xlsx")
     lreport.add_argument("--provider", default="deepseek",
-                         choices=sorted(PROVIDER_PRESETS))
+                         choices=PROVIDER_NAMES)
     lreport.add_argument("--model")
     lreport.add_argument("--api-key")
     lreport.set_defaults(func=_cmd_lqa_report)
@@ -2094,7 +2150,7 @@ def main(argv=None) -> int:
     ptrans.add_argument("--out", required=True,
                         help="output work folder")
     ptrans.add_argument("--provider", default="deepseek",
-                        choices=sorted(PROVIDER_PRESETS))
+                        choices=PROVIDER_NAMES)
     ptrans.add_argument("--model")
     ptrans.add_argument("--api-key")
     ptrans.add_argument("--game", help="game name for the prompt")
@@ -2120,7 +2176,7 @@ def main(argv=None) -> int:
     pscan.add_argument("--locale", default="en")
     pscan.add_argument("--source-lang", default="zh-CN")
     pscan.add_argument("--provider", default="deepseek",
-                       choices=sorted(PROVIDER_PRESETS))
+                       choices=PROVIDER_NAMES)
     pscan.add_argument("--model")
     pscan.add_argument("--api-key")
     pscan.add_argument("--deterministic-only", action="store_true",
@@ -2150,7 +2206,7 @@ def main(argv=None) -> int:
     imp.add_argument("--out", help="dir for RAG json + csv "
                                    "(default: the job's s3/)")
     imp.add_argument("--provider", default="deepseek",
-                     choices=sorted(PROVIDER_PRESETS))
+                     choices=PROVIDER_NAMES)
     imp.add_argument("--model")
     imp.add_argument("--api-key")
     imp.set_defaults(func=_cmd_glossary_import)
@@ -2203,7 +2259,7 @@ def main(argv=None) -> int:
     gext.add_argument("--term", action="append", metavar="zh=EN",
                       help="extra locked term ruling (repeatable)")
     gext.add_argument("--provider", default="none",
-                      choices=["none"] + sorted(PROVIDER_PRESETS),
+                      choices=["none"] + PROVIDER_NAMES,
                       help="stage-2 noise filter LLM (default: none = "
                            "deterministic heuristic)")
     gext.add_argument("--model")
@@ -2377,7 +2433,7 @@ def main(argv=None) -> int:
                           help="classify strings no structural rule "
                                "could decide")
     classify.add_argument("--provider", default="deepseek",
-                          choices=sorted(PROVIDER_PRESETS))
+                          choices=PROVIDER_NAMES)
     classify.add_argument("--model")
     classify.add_argument("--api-key")
     classify.add_argument("--correct", action="append", metavar="key=domain",
@@ -2393,8 +2449,16 @@ def main(argv=None) -> int:
     chat.add_argument("--by", required=True,
                       help="operator name recorded on gate approvals")
     chat.add_argument("--provider", default="deepseek",
-                      choices=sorted(PROVIDER_PRESETS))
+                      choices=PROVIDER_NAMES,
+                      help="the chat agent's own reasoning model "
+                           "(fixed for the session)")
     chat.add_argument("--model")
+    chat.add_argument("--work-provider", choices=PROVIDER_NAMES,
+                      help="provider for stage steps and language work "
+                           "(default: --provider); switch mid-session "
+                           "with /model")
+    chat.add_argument("--work-model",
+                      help="model for stage steps and language work")
     chat.add_argument("--api-key")
     chat.add_argument("--dry-run", action="store_true",
                       help="stage steps run with echo stubs (chat itself "
