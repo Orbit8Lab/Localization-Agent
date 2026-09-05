@@ -115,6 +115,90 @@ def term_in_text(term: str, text: str) -> bool:
     return re.search(left + re.escape(term_l) + right, text_l) is not None
 
 
+def term_spans(term: str, text: str) -> List[tuple]:
+    """Every ``(start, end)`` where `term` matches, same rules as
+    `term_in_text`. Positions are what makes longest-match possible."""
+    term_l, text_l = term.lower(), text.lower()
+    left = r"\b" if (term_l[:1].isascii() and term_l[:1].isalnum()) else ""
+    right = r"\b" if (term_l[-1:].isascii() and term_l[-1:].isalnum()) else ""
+    pattern = left + re.escape(term_l) + right
+    return [(m.start(), m.end()) for m in re.finditer(pattern, text_l)]
+
+
+_PLURAL = r"(?:s|es)?"
+
+
+def _inflected_spans(term: str, text: str) -> List[tuple]:
+    """Spans where `term` occurs with ANY of its words pluralized.
+
+    An English multi-word term is written inflected in real scripts, and
+    not always on the last word: the glossary holds "Firework Festival"
+    while the script says "Fireworks Festival"; it holds "Spirit
+    Guardian" while the script says "Spirit Guardians". Both broke the
+    same way — the longer term matched nothing, so a nested short term
+    ("Festival", "spirit") claimed the span and produced a terminology
+    defect against a correct translation.
+
+    Matching an optional plural suffix after EVERY word covers both, and
+    the two earlier point-fixes (trailing "s", trailing "es") collapse
+    into it. Only COVERAGE is decided here — which term owns the span —
+    so a loose match costs nothing: the finding itself is still raised by
+    the exact term, and a term absent from the source still matches
+    nothing.
+    """
+    if not term or not term[-1:].isascii():
+        return []
+    words = [w for w in re.split(r"(\s+)", term.lower()) if w]
+    pattern = "".join(re.escape(w) + ("" if w.isspace() else _PLURAL)
+                      for w in words)
+    left = r"\b" if term[:1].isalnum() else ""
+    try:
+        return [(m.start(), m.end())
+                for m in re.finditer(left + pattern + r"\b", text.lower())]
+    except re.error:
+        return []
+
+
+def applicable_terms(source: str,
+                     locked_terms: Dict[str, str]) -> Dict[str, str]:
+    """The locked terms a source string is actually subject to, resolving
+    NESTED entries by longest match.
+
+    A termbase legitimately contains a term inside a longer one —
+    "Spirit" and "Spirit Guardian", "Season Seed" and "Autumn Season
+    Seed", "Festival" and "Firework Festival". The check ran each entry
+    independently, so "Find your Spirit Guardian" was held to BOTH
+    "Spirit Guardian" -> 守护灵 AND "Spirit" -> 灵体, and a correct
+    translation was reported as a terminology defect because 灵体 was
+    absent. On the Nomori termbase 29 pairs nest this way, most of them
+    the seasonal families, so the noise was systematic rather than rare.
+
+    Longest match wins the text it covers: once "Autumn Spirit Guardian"
+    claims a span, "Spirit Guardian" and "Spirit" cannot be required
+    inside it. A shorter term still applies where it occurs on its own —
+    "The spirit fled the Spirit Guardian" is subject to both.
+
+    Ordering is by match length, then term length, so the decision never
+    depends on dict insertion order (the glossary is merged from three
+    tiers, and its order is not meaningful).
+    """
+    claimed: List[tuple] = []
+    applicable: Dict[str, str] = {}
+    candidates = []
+    for term, rendering in locked_terms.items():
+        spans = term_spans(term, source) or _inflected_spans(term, source)
+        for start, end in spans:
+            candidates.append((end - start, len(term), term, rendering,
+                               start, end))
+    for _len, _tlen, term, rendering, start, end in sorted(
+            candidates, key=lambda c: (-c[0], -c[1], c[4])):
+        if any(start < c_end and end > c_start for c_start, c_end in claimed):
+            continue                    # covered by a longer term
+        claimed.append((start, end))
+        applicable[term] = rendering
+    return applicable
+
+
 def locked_in_target(locked: str, target: str, target_lang: str,
                      morphology=None, variants: Iterable[str] = (),
                      forms: Optional[Dict[str, str]] = None,
@@ -243,6 +327,67 @@ def width_ratio(source: str, target: str) -> float:
     return (display_width(target) / src) if src else 0.0
 
 
+_SPEAKER_SRC = re.compile(r"^\s*([A-Za-z][A-Za-z .\'-]{0,30}?)\s*:")
+_SPEAKER_TGT = re.compile(r"^\s*([^\s:：]{1,20})\s*[:：]")
+
+
+def speaker_mismatch(source: str, target: str,
+                     locked_terms: Dict[str, str]) -> Optional[tuple]:
+    """`(source speaker, target speaker, expected)` when a dialogue line's
+    target names a DIFFERENT character, else None.
+
+    Game scripts prefix dialogue with the speaker, and the speaker names
+    are already locked glossary terms ("Yuki" -> "小雪"), so the mapping
+    needed to check this exists without any new configuration.
+
+    This is the signal for a MISALIGNED row — a target that is not a
+    translation of its source at all. It fires only when BOTH sides carry
+    a prefix AND the source speaker is a locked term AND the target's
+    prefix is a known rendering of some OTHER locked term. Anything less
+    certain — an unmapped name, a missing prefix, a target prefix that is
+    not a known character — returns None rather than guessing.
+
+    Why a prefix disagreement is sufficient evidence on its own: measured
+    over the Nomori zh-CN corpus, 1302 speaker-tagged lines render the
+    speaker correctly, 3 name a different character, and 57 are unmapped
+    (skipped). Translators do not silently swap one character's name for
+    another's — when the prefix says someone else, the line is someone
+    else's.
+
+    KNOWN LIMIT: a line whose ONLY defect is a misrendered speaker
+    ("Kodama: Hello!" -> "小雪:你好！", a faithful translation with one
+    wrong name) is reported as misalignment rather than terminology. That
+    is a deliberate trade: the message names both speakers and asks the
+    client to confirm the line mapping, so a reader can tell the two
+    apart, and the corpus above contains no such case. Revisit if one
+    appears.
+    """
+    src_match = _SPEAKER_SRC.match(source)
+    tgt_match = _SPEAKER_TGT.match(target)
+    if not src_match or not tgt_match:
+        return None
+    src_speaker = src_match.group(1).strip()
+    tgt_speaker = tgt_match.group(1).strip()
+    expected = None
+    for term, rendering in locked_terms.items():
+        if term.strip().lower() == src_speaker.lower():
+            expected = rendering
+            break
+    if expected is None:
+        return None                     # not a known character: stay quiet
+    if _normalize(tgt_speaker) == _normalize(expected):
+        return None                     # correct rendering
+    # Only claim misalignment when the target names ANOTHER known
+    # character. A merely misrendered speaker is a terminology defect and
+    # belongs to that check, not this one.
+    others = {r for t, r in locked_terms.items()
+              if t.strip().lower() != src_speaker.lower()}
+    if not any(_normalize(tgt_speaker) == _normalize(other)
+               for other in others):
+        return None
+    return (src_speaker, tgt_speaker, expected)
+
+
 def run_gate(key: str, source: str, target: str, cfg: GateConfig,
              term_decisions: Optional[Dict[str, str]] = None,
              max_len: Optional[int] = None,
@@ -260,6 +405,26 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
         return [Finding(key=key, bug_type=BugType.OMISSION,
                         severity=Severity.HIGH,
                         message="Empty translation.", evidence="")]
+
+    # 1b. MISALIGNMENT: the target is not a translation of this source.
+    #     Runs before every component check because it SUBSUMES them. A
+    #     misaligned dialogue row trips terminology (wrong speaker name)
+    #     and placeholder (absent markup) by construction, and reporting
+    #     those is actively harmful: told "render 'Yuki' as '小雪'", a
+    #     client edits a translation that was never Yuki's line. The
+    #     component failures are consequences; this is the cause.
+    misaligned = speaker_mismatch(source, target, cfg.locked_terms)
+    if misaligned:
+        src_speaker, tgt_speaker, expected = misaligned
+        return [Finding(
+            key=key, bug_type=BugType.MISTRANSLATION, severity=Severity.HIGH,
+            message=(f"Source/target misalignment: the source is spoken by "
+                     f"{src_speaker!r} (expected {expected!r}) but the "
+                     f"target is spoken by {tgt_speaker!r}. The target "
+                     f"appears to be the translation of a DIFFERENT line, "
+                     f"so this is not a terminology fix — confirm the line "
+                     f"mapping in the export."),
+            evidence=target[:80])]
 
     # 2. placeholder / markup integrity (multiset equality)
     src_ph, tgt_ph = _extract_placeholders(source), _extract_placeholders(target)
@@ -279,9 +444,10 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
 
     # 3. glossary compliance: locked term in source => locked rendering in
     #    target; cross-check the Translator's claimed term_decisions.
-    for term, locked in cfg.locked_terms.items():
-        if not term_in_text(term, source):
-            continue
+    # Longest match wins: a nested entry ("Spirit" inside "Spirit
+    # Guardian") must not be enforced inside the span the longer term
+    # already claims. See `applicable_terms`.
+    for term, locked in applicable_terms(source, cfg.locked_terms).items():
         morphology = getattr(cfg.style_guide, "morphology", None)
         if not locked_in_target(locked, target, cfg.target_lang,
                                 morphology=morphology,
@@ -316,6 +482,14 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
             key=key, bug_type=BugType.UNTRANSLATED, severity=Severity.HIGH,
             message="Target is identical to source (untranslated).",
             evidence=target[:80]))
+        # An untranslated string CANNOT satisfy the glossary: the locked
+        # rendering is absent precisely because nothing was translated.
+        # Reporting both produced two HIGH rows for one defect, and the
+        # terminology one is unactionable on its own — you cannot fix the
+        # term without translating the string. Keep the cause, drop the
+        # consequence.
+        findings = [f for f in findings
+                    if f.bug_type != BugType.TERMINOLOGY]
 
     # 5. source-script leakage (e.g. Han characters in a ru target)
     src_scripts = ALLOWED_SCRIPTS.get(cfg.source_lang.lower(), set())

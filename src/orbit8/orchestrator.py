@@ -38,13 +38,24 @@ from .schemas import IntakeBrief, Strict
 from .skill_docs import SkillLibrary
 from .tenancy import TenantError, resolve_read, resolve_write
 
-MAX_STEPS_PER_TURN = 14
+# Tool calls one turn may make. 20 covers a legitimate multi-file session
+# — list a drop, inspect five spreadsheets, standardize four locales,
+# verify each — with headroom. Deliberately not much higher: both loops
+# seen in practice made ZERO progress, so a bigger budget would have
+# bought more wasted calls and a longer wait, not a better answer. The
+# repeat-call breaker below is what actually stops those.
+MAX_STEPS_PER_TURN = 20
 
-# How many times one tool may fail IDENTICALLY (same tool, same args, same
-# error) before the turn stops. Two, not one: a first retry is sometimes
-# reasonable (a transient read), but a second identical failure is proof
-# the inputs cannot produce a different outcome.
+# How many times one tool may return an IDENTICAL result (same tool, same
+# args, same output) before the turn stops.
+#
+# Two was too tight for SUCCESS: re-reading a directory listing before
+# acting on it is ordinary planning, and cutting the turn there stopped
+# real work. Three is the point where it is a loop rather than a
+# re-read. Failures keep the tighter bound — an identical error cannot
+# become a different one, so a second attempt is already pointless.
 REPEAT_FAILURE_LIMIT = 2
+REPEAT_SUCCESS_LIMIT = 3
 
 # The context budget. Owned in ONE place (context.ContextAssembler) rather
 # than emerging from constants that never knew about each other: before
@@ -61,6 +72,24 @@ REPEAT_FAILURE_LIMIT = 2
 # assembled result is the signal if it is ever set too high.
 CONTEXT_BUDGET_TOKENS = 100_000
 REPLY_RESERVE_TOKENS = 2_000      # headroom for the model's own answer
+
+
+def max_steps_per_turn() -> int:
+    """Step cap, overridable via ``$ORBIT8_MAX_STEPS``.
+
+    Tunable per box for the same reason as the context budget: what counts
+    as "a long turn" depends on how many locales and files a project has,
+    and that should not require editing source.
+    """
+    import os
+    raw = os.environ.get("ORBIT8_MAX_STEPS")
+    if not raw:
+        return MAX_STEPS_PER_TURN
+    try:
+        value = int(raw)
+    except ValueError:
+        return MAX_STEPS_PER_TURN
+    return value if value > 0 else MAX_STEPS_PER_TURN
 
 
 def context_budget() -> int:
@@ -122,12 +151,22 @@ directory inside the project folder
 <next_offset> to read on. NEVER describe content you have not actually \
 read in a window; page to it first.
 - {"tool": "standardize", "args": {"files": ["<file>", …], "output": \
-"source_json" | "bilingual_jsonl", "out_name": "<name>"}} — convert \
-received files into a pipeline format. source_json: flat {key: source \
-text} translation input, any supported/adapted format. bilingual_jsonl: \
-LQA/MT input paired from target-language .po files (msgid=source, \
-msgstr=target) — inspect first to confirm msgstr is actually filled. \
-Writes under the job's exports/ dir.
+"source_json" | "bilingual_jsonl", "out_name": "<name>", "target_lang": \
+"<locale>", "columns": ["<source col>", "<target col>"], "out_dir": \
+"<dir>"}} — convert received files into a pipeline format. source_json: \
+flat {key: source text} translation input. bilingual_jsonl: LQA/MT input \
+of source+target pairs. ALWAYS inspect_file first; the layout decides the \
+call:
+  · one file holding BOTH languages in columns → pass that one file;
+  · SEPARATE files per language (e.g. "Game (Source).xlsx" + \
+"Game_ja.xlsx") → pass BOTH, source first — one file alone cannot be \
+paired with itself;
+  · one sheet with SEVERAL target languages (a term list: English / 简体\
+中文 / 日本語 …) → add "columns": ["English", "简体中文"] to pick the two \
+to pair, and repeat per locale.
+  "target_lang" is REQUIRED when the job has more than one target locale. \
+"out_dir" writes elsewhere than the job's exports/ (e.g. \
+"40-reference/glossary" for terminology); it must stay inside the project.
 - {"tool": "analyze", "args": {"files": ["<file>", …], "classify": \
 false}} — corpus text analysis: total/unique strings, word counts (CJK \
 chars count as words), placeholders, and the domain breakdown with \
@@ -178,6 +217,52 @@ DeepSeek. Outputs a stream-patched copy (untouched entries \
 byte-identical), the standard MTPE form for post-editing, and a report. \
 This is a WORK PRODUCT, not a delivery — deliveries go through \
 deliver_po after post-editing.
+- {"tool": "glossary_from_sheet", "args": {"sheet": "<term sheet>", \
+"source_column": "<header>", "target_column": "<header>", "locale": \
+"<locale>", "lock": false, "out_dir": "<optional>"}} — a client TERM \
+SHEET → the T1 termbase the deterministic gate enforces. This is NOT a \
+conversion of bilingual_jsonl: a JSONL row is a translation to be \
+CHECKED, a termbase entry is a term that is LAW. Run it once per locale. \
+"lock" records that a HUMAN ratified the renderings: the T1 terminology \
+check enforces the termbase either way, while the T2 cross-corpus \
+consistency check speaks only for locked terms.
+- {"tool": "lqa_smoke", "args": {"pairs": "<bilingual .jsonl>", \
+"locale": "<target locale>", "size": 5}} — PRE-FLIGHT an audit before \
+running it: resolves the locale, loads the glossary and reviews a few \
+real pairs, writing NOTHING. Run this FIRST whenever the operator is \
+about to audit a large file, and report what it says — the resolved \
+locale, how many glossary terms are enforced, and the sampled pairs. It \
+costs seconds and catches the misconfiguration that a full audit \
+reports as hundreds of real-looking defects. If it warns that EVERY \
+sampled string was flagged, STOP and tell the operator: that is a \
+wrong-locale or wrong-glossary run, not a bad translation.
+- {"tool": "lqa_run", "args": {"pairs": "<bilingual .jsonl>", "locale": \
+"<target locale>", "name": "<audit name>", "deterministic_only": false}} \
+— audit a bilingual JSONL through the tier cascade (T1 mechanical → T2 \
+consistency → T3 semantic → verifier), attempt-versioned under s5. This \
+is what a `standardize` → bilingual_jsonl output feeds: use it for \
+.jsonl, `scan_po` for a .po. Run it ONCE PER LOCALE — the cascade audits \
+one language pair at a time, so give each run its own "name" or later \
+locales overwrite earlier ones. "locale" names the language being \
+audited and must match the pairs file, which the audit refuses to \
+review under any other language's glossary and rules; omit it and the \
+pairs file's own target_language decides.
+- {"tool": "lqa_report", "args": {"name": "<audit name from lqa_run>", \
+"locations_from": "<optional bilingual .jsonl/.po for String IDs>", \
+"no_suggestions": false, "timestamp": "<optional YYYYMMDD>", \
+"tag": "<optional filename suffix>"}} — build the CLIENT DELIVERABLE \
+from a stored audit: a bug-report xlsx plus a technical summary, written \
+to 30-deliverables/<date>-lqa-report/. This is the step AFTER lqa_run; \
+"name" must match the name that run used, and calling it with no name \
+lists the audits available. "locations_from" should be the SAME \
+locale's bilingual file as the audit. Leave "no_suggestions" false to \
+have the Repair agent propose glossary-checked corrections (costs LLM \
+calls); true skips it, and the reviewer's own fixes still fill the \
+column. If the result comes back "refused", the audit's stored locale \
+disagrees with its name or with locations_from — report the warnings \
+VERBATIM and STOP; never pass force:true on your own initiative, \
+because a mislabelled bug report cannot be recalled once the client has \
+it.
 - {"tool": "scan_po", "args": {"po": "<translated bilingual .po>", \
 "glossary": "<optional — defaults to the project's active termbase>", \
 "out_dir": "<work folder>", "game": "<name>", \
@@ -215,6 +300,7 @@ audit) + a Needs-EN work queue. Prefer this over update_glossary when \
 the operator wants a glossary BUILT from a corpus or complains the \
 review has sentence-length entries.
 - {"tool": "deliver_po", "args": {"review": "<filled review .xlsx>", \
+"locale": "<target locale — required when the job has several>", \
 "po_files": ["<shipped .po>", …], "out_dir": "<optional, default \
 30-deliverables>", "timestamp": "<optional YYYYMMDD>"}} — apply the \
 post-editing team's decisions to the .po files and write a timestamped \
@@ -397,20 +483,94 @@ class ChatOrchestrator:
                             tenant_id=self.tenant_id)
 
     def _t_list_files(self, args: dict) -> str:
-        directory = self._confine_read(str(args.get("dir", "")))
+        raw = str(args.get("dir", ""))
+        directory = self._confine_read(raw)
         if not directory.is_dir():
             return f"error: not a directory: {directory}"
+        children = [p for p in sorted(directory.iterdir())
+                    if p.name != ".DS_Store"]
         entries = [(p.name + "/" if p.is_dir() else
-                    f"{p.name} ({p.stat().st_size}B)")
-                   for p in sorted(directory.iterdir())
-                   if p.name not in (".DS_Store",)]
-        return json.dumps(entries[:60], ensure_ascii=False)
+                    f"{p.name} ({p.stat().st_size}B)") for p in children]
+        # A bare name list left the model unable to say what to pass next,
+        # so it re-listed the same directory five times. Returning the
+        # DIRECTORY and ready-to-use child paths makes the next call
+        # obvious instead of a guess.
+        subdirs = [f"{raw.rstrip('/')}/{p.name}" if raw else p.name
+                   for p in children if p.is_dir()]
+        result = {"dir": str(directory), "entries": entries[:60]}
+        if subdirs:
+            result["subdirectories"] = subdirs[:20]
+            result["note"] = ("To look inside one, call list_files again "
+                              "with a path from 'subdirectories' — not "
+                              "the same 'dir' as this call.")
+        if len(entries) > 60:
+            result["truncated"] = f"{len(entries) - 60} more not shown"
+        return json.dumps(result, ensure_ascii=False)
+
+    @staticmethod
+    def _tabular_preview(path: Path, suffix: str) -> Dict[str, object]:
+        """Sheets, headers and a few rows — what a spreadsheet actually is.
+
+        The question an operator asks of a localization spreadsheet is
+        always "which column is the source and which is the target", so
+        that is what this answers. Column letters are included because the
+        adapter-writer prompt refers to them.
+        """
+        preview: Dict[str, object] = {"format": suffix.lstrip(".")}
+        try:
+            if suffix in (".csv", ".tsv"):
+                import csv as _csv
+                delimiter = "\t" if suffix == ".tsv" else ","
+                with path.open("r", encoding="utf-8-sig",
+                               errors="replace", newline="") as handle:
+                    rows = []
+                    for index, row in enumerate(_csv.reader(
+                            handle, delimiter=delimiter)):
+                        if index > 5:
+                            break
+                        rows.append([cell[:60] for cell in row])
+                preview.update(header=rows[0] if rows else [],
+                               sample_rows=rows[1:])
+                return preview
+
+            from openpyxl import load_workbook
+            # read_only + values_only: a localization export can be tens of
+            # MB, and nothing here needs formatting or formulas.
+            book = load_workbook(path, read_only=True, data_only=True)
+            preview["sheets"] = book.sheetnames
+            sheets = []
+            for name in book.sheetnames[:3]:
+                sheet = book[name]
+                rows = []
+                for index, row in enumerate(
+                        sheet.iter_rows(max_row=6, values_only=True)):
+                    rows.append(["" if cell is None else str(cell)[:60]
+                                 for cell in row])
+                    if index >= 5:
+                        break
+                sheets.append({
+                    "sheet": name,
+                    "rows_total": sheet.max_row,
+                    "columns": [chr(65 + n) if n < 26 else f"col{n}"
+                                for n in range(len(rows[0]))] if rows else [],
+                    "header": rows[0] if rows else [],
+                    "sample_rows": rows[1:],
+                })
+            book.close()
+            preview["sheet_preview"] = sheets
+        except Exception as err:
+            # Report the failure rather than falling back to a byte peek:
+            # binary noise is what caused the loop this method exists to
+            # prevent.
+            preview["error"] = f"could not read as a spreadsheet: {err}"
+        return preview
 
     def _t_inspect_file(self, args: dict) -> str:
         path = self._confine_read(str(args.get("path", "")))
         raw = path.read_bytes()
         info: Dict[str, object] = {"file": path.name, "bytes": len(raw)}
-        if path.suffix.lower() == ".po":
+        suffix = path.suffix.lower()
+        if suffix == ".po":
             from .exports import read_po_entries
             entries = read_po_entries(path)
             filled = sum(1 for _, _, t, _ in entries if t.strip())
@@ -418,6 +578,13 @@ class ChatOrchestrator:
                         sample=[{"key": k[:16], "msgid": s[:60],
                                  "msgstr": t[:60]}
                                 for k, s, t, _ in entries[:3]])
+        elif suffix in (".xlsx", ".xlsm", ".csv", ".tsv"):
+            # A spreadsheet is not text. Falling through to the byte peek
+            # handed the model `PK\x03\x04…` (an xlsx is a zip), which
+            # answers nothing about the columns — so it called inspect
+            # again, and again, and burned the whole step budget on a tool
+            # that "succeeded" every time.
+            info.update(self._tabular_preview(path, suffix))
         else:
             # Text peek. The old flat 800-byte cap silently hid the tail of
             # every generated report (a compare .md is ~5KB, its .json
@@ -439,6 +606,146 @@ class ChatOrchestrator:
                 info["remaining_chars"] = len(text) - end
         return json.dumps(info, ensure_ascii=False)
 
+    @staticmethod
+    def _read_table(path: Path):
+        """(header, rows) from a spreadsheet, or None if not one.
+
+        Deterministic, no model call. A term sheet is a plain table with
+        named columns — using a generated adapter for it would key the
+        cache by file suffix while the script hardcodes one language's
+        column, so the ja adapter would be reused for ko and quietly emit
+        Japanese.
+        """
+        suffix = path.suffix.lower()
+        try:
+            if suffix in (".csv", ".tsv"):
+                import csv as _csv
+                with path.open("r", encoding="utf-8-sig", errors="replace",
+                               newline="") as handle:
+                    rows = list(_csv.reader(
+                        handle, delimiter="\t" if suffix == ".tsv" else ","))
+                return (rows[0], rows[1:]) if rows else None
+            if suffix in (".xlsx", ".xlsm"):
+                from openpyxl import load_workbook
+                book = load_workbook(path, read_only=True, data_only=True)
+                sheet = book[book.sheetnames[0]]
+                rows = [["" if cell is None else str(cell) for cell in row]
+                        for row in sheet.iter_rows(values_only=True)]
+                book.close()
+                return (rows[0], rows[1:]) if rows else None
+        except Exception:
+            return None
+        return None
+
+    def _standardize_all_locales(self, files, intake, out_dir: Path,
+                                 source_column: str, column_map: dict,
+                                 stem: str) -> str:
+        """Every locale from one multi-language sheet, in one call.
+
+        Output stays one file per locale because that is what the LQA
+        cascade consumes: T1 checks placeholders and width against ONE
+        target, T2 checks consistency within ONE locale, T3 reviews ONE
+        language pair. A merged file could not say which locale a finding
+        belongs to.
+
+        What this removes is the WASTE, not the format: reading the same
+        sheet four times, and re-deriving how to read it four times.
+
+        Failures are per-locale — one bad column must not cost the others,
+        and the operator needs to know exactly which one to fix.
+        """
+        from .exports import emit_bilingual_jsonl
+
+        # Read the sheet ONCE with the deterministic reader. A term sheet
+        # is a plain table with named columns, so there is nothing here
+        # that needs a generated adapter — and using one would key the
+        # cache by suffix while the script itself hardcodes a column,
+        # which is how the wrong language ends up in a reused adapter.
+        table = self._read_table(files[0]) if len(files) == 1 else None
+
+        results, failures = [], []
+        if table is not None:
+            header, rows = table
+            if source_column not in header:
+                return json.dumps({
+                    "status": "failed", "written": [],
+                    "failed": [f"source column {source_column!r} not found; "
+                               f"headers are {header}"]}, ensure_ascii=False)
+            source_index = header.index(source_column)
+            for locale, column in column_map.items():
+                if locale not in intake.target_locales:
+                    failures.append(
+                        f"{locale}: not a target locale of this job "
+                        f"({', '.join(intake.target_locales)})")
+                    continue
+                if str(column) not in header:
+                    failures.append(
+                        f"{locale}: column {column!r} not found; headers "
+                        f"are {header}")
+                    continue
+                target_index = header.index(str(column))
+                pairs = [(row[source_index], row[source_index],
+                          row[target_index], str(files[0]))
+                         for row in rows
+                         if len(row) > max(source_index, target_index)
+                         and str(row[source_index]).strip()]
+                out = out_dir / f"{stem}_{intake.source_lang}-{locale}.jsonl"
+                try:
+                    from .exports import _write_pairs
+                    empty = sum(1 for _k, _s, t, _l in pairs
+                                if not str(t).strip())
+                    written, _ = _write_pairs(
+                        pairs, out, source_lang=intake.source_lang,
+                        target_lang=locale, empty=empty, identical=0)
+                except Exception as err:
+                    failures.append(f"{locale} (column {column!r}): {err}")
+                    continue
+                results.append({"locale": locale, "column": column,
+                                "written": written,
+                                "empty_targets_included": empty,
+                                "path": str(out)})
+            return json.dumps({
+                "status": "complete" if results and not failures
+                          else ("partial" if results else "failed"),
+                "written": results, "failed": failures,
+                "next": ("Each locale has its own file — the LQA cascade "
+                         "audits ONE language pair at a time. Do not "
+                         "re-run these; report the paths and counts."
+                         if results else
+                         "Nothing was written; fix the errors above.")},
+                ensure_ascii=False)
+        for locale, column in column_map.items():
+            if locale not in intake.target_locales:
+                failures.append(
+                    f"{locale}: not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+                continue
+            out = out_dir / f"{stem}_{intake.source_lang}-{locale}.jsonl"
+            try:
+                written, empty = emit_bilingual_jsonl(
+                    files, out, source_lang=intake.source_lang,
+                    target_lang=locale,
+                    columns=[source_column, str(column)],
+                    fallback=self.job._bilingual_fallback(self.provider,
+                                                          self.dry_run))
+            except Exception as err:
+                failures.append(f"{locale} (column {column!r}): {err}")
+                continue
+            results.append({"locale": locale, "column": column,
+                            "written": written,
+                            "empty_targets_included": empty,
+                            "path": str(out)})
+        return json.dumps({
+            "status": "complete" if results and not failures
+                      else ("partial" if results else "failed"),
+            "written": results, "failed": failures,
+            "next": ("Each locale has its own file — the LQA cascade "
+                     "audits ONE language pair at a time. Do not re-run "
+                     "these; report the paths and counts."
+                     if results else
+                     "Nothing was written; fix the errors above.")},
+            ensure_ascii=False)
+
     def _t_standardize(self, args: dict) -> str:
         from .exports import emit_bilingual_jsonl, emit_flat_json
         from .ingest import ingest_any
@@ -448,7 +755,17 @@ class ChatOrchestrator:
         if not files:
             return "error: no files given"
         intake = self.job.store.read(0, "intake", IntakeBrief)
-        out_dir = self.job.store.job_dir / "exports"
+        # Where the output lands is a real decision, not a constant. A
+        # glossary belongs in the PROJECT's 40-reference/glossary/, where
+        # every later stage resolves it (project_paths.py); a job's
+        # exports/ is the right home only for job-scoped conversions.
+        # Hardcoding it forced the agent to say "the tool will not let me
+        # put this where you asked" — accurate, and a missing capability.
+        # `_confine` (write path) keeps it inside this project.
+        if args.get("out_dir"):
+            out_dir = self._confine(str(args["out_dir"]))
+        else:
+            out_dir = self.job.store.job_dir / "exports"
         if output == "source_json":
             name = str(args.get("out_name") or "strings")
             if not name.endswith(".json"):
@@ -460,21 +777,106 @@ class ChatOrchestrator:
             for file in files:
                 records.extend(ingest_any(file, fallback=fallback))
             count = emit_flat_json(records, out)
-            return json.dumps({"written": count, "path": str(out)})
+            return json.dumps({
+                "status": "complete", "written": count, "path": str(out),
+                "next": ("This file is DONE — do not call standardize for "
+                         "it again. Report the path and count to the "
+                         "operator.")})
         if output == "bilingual_jsonl":
-            locale = str(args.get("target_lang")
-                         or intake.target_locales[0])
+            # `column_map` supplies the locales itself (one per column), so
+            # it is handled BEFORE the single-locale rules below — asking
+            # it for one `target_lang` would be asking the wrong question.
+            column_map = args.get("column_map")
+            if column_map:
+                if not isinstance(column_map, dict):
+                    return ('error: "column_map" maps locale → column '
+                            'name, e.g. {"ja": "日本語", "ko": "한국어"}')
+                source_column = str(args.get("source_column") or "")
+                if not source_column:
+                    return ('error: "column_map" needs "source_column" too '
+                            '— which column holds the source language')
+                return self._standardize_all_locales(
+                    files, intake, out_dir, source_column, column_map,
+                    str(args.get("out_name") or "glossary"))
+
+            # Never guess the locale when several are configured. Falling
+            # back to target_locales[0] labelled a Japanese file "zh-CN"
+            # and wrote 400 rows nobody could use — a mislabelled export
+            # is worse than a refusal, because it looks fine.
+            locale = str(args.get("target_lang") or "")
+            if not locale:
+                if len(intake.target_locales) != 1:
+                    return (f"error: this job has "
+                            f"{len(intake.target_locales)} target locales "
+                            f"({', '.join(intake.target_locales)}); pass "
+                            f'"target_lang" to say which one this file '
+                            f"holds")
+                locale = intake.target_locales[0]
+            if locale not in intake.target_locales:
+                return (f"error: {locale!r} is not a target locale of this "
+                        f"job ({', '.join(intake.target_locales)})")
             name = str(args.get("out_name")
                        or f"pairs_{intake.source_lang}-{locale}")
             if not name.endswith(".jsonl"):
                 name += ".jsonl"
             out = out_dir / name
+            # Cheap structural check BEFORE any model call. A single
+            # non-.po file cannot yield pairs unless it holds both
+            # languages in columns — and when it does not, the adapter
+            # writer spends three attempts discovering that a file cannot
+            # be paired with itself (~190s observed). A .po is exempt: it
+            # carries msgid AND msgstr, so one file is genuinely enough.
+            # `columns` names which two columns to pair when one sheet
+            # holds several languages — a term sheet
+            # (English/简体中文/繁體中文/한국어/日本語) is one row per
+            # concept with FOUR target columns, so "source + target file"
+            # does not describe it and neither pipeline format fits. With
+            # the columns named, one sheet yields one pair set per locale.
+            columns = args.get("columns") or []
+            single = [f for f in files if f.suffix.lower() != ".po"]
+
+            # A multi-language sheet maps to SEVERAL locales at once.
+            # The OUTPUT must stay one source+target per file — the LQA
+            # cascade checks placeholders, consistency and semantics
+            # against ONE target, and a merged report could not say which
+            # locale a finding belongs to. But re-reading the same sheet
+            # four times to say that is pure waste, so one call can emit
+            # every locale.
+            if columns and len(columns) != 2:
+                return ('error: "columns" takes exactly two names — the '
+                        'source column and the target column, e.g. '
+                        '["English", "简体中文"]')
+            if len(files) == 1 and single and not columns:
+                preview = self._tabular_preview(files[0],
+                                                files[0].suffix.lower())
+                header = (preview.get("header")
+                          or (preview.get("sheet_preview") or [{}])[0]
+                          .get("header") or [])
+                if len(header) < 3:
+                    return (
+                        f"error: {files[0].name!r} has {len(header)} "
+                        f"column(s) — too few to hold both a source and a "
+                        f"{locale} translation. If the source text is in a "
+                        f"separate file, pass BOTH (source first, then the "
+                        f"{locale} file) so they can be paired on key.")
             written, empty = emit_bilingual_jsonl(
                 files, out, source_lang=intake.source_lang,
-                target_lang=locale)
-            return json.dumps({"written": written,
-                               "empty_targets_included": empty,
-                               "path": str(out)})
+                target_lang=locale, columns=list(columns) or None,
+                fallback=self.job._bilingual_fallback(self.provider,
+                                                      self.dry_run))
+            # `status: complete` and the explicit instruction are not
+            # decoration: a bare {"written": 1395, "path": …} reads as
+            # ambiguous, and the model re-issued the identical call three
+            # times before the loop breaker stopped it — repeating work
+            # that had already succeeded on the first try.
+            return json.dumps({
+                "status": "complete",
+                "written": written,
+                "empty_targets_included": empty,
+                "path": str(out),
+                "next": (f"This file is DONE — do not call standardize for "
+                         f"{locale} again. Report the path and counts to "
+                         f"the operator, or move on to another locale.")})
         return (f"error: unknown output {output!r}; use source_json or "
                 f"bilingual_jsonl")
 
@@ -548,6 +950,307 @@ class ChatOrchestrator:
              "tokens_spent": run.tokens, "sanity_format": run.sanity,
              "mtpe_form": str(Path(str(args.get("out_dir", "")))
                               / "mtpe_form.xlsx")}, ensure_ascii=False)
+
+    def _t_glossary_from_sheet(self, args: dict) -> str:
+        """A client term sheet → the T1 termbase the deterministic gate reads.
+
+        NOT a conversion of `bilingual_jsonl`. Those two artifacts carry
+        different things: a JSONL row is a translation to be CHECKED, a
+        termbase entry is a term that is LAW, with `locked`, `tier`,
+        `forms` and provenance. Deriving a termbase from pairs would
+        produce entries with none of that — a glossary where nothing is
+        enforceable. The sheet still has the information; the JSONL has
+        already discarded it, so this reads the sheet.
+        """
+        from datetime import date
+
+        from .glossary_import import emit_rag_json
+
+        sheet = self._confine_read(str(args.get("sheet", "")))
+        if not sheet.exists():
+            return f"error: no such file: {sheet}"
+        table = self._read_table(sheet)
+        if table is None:
+            return (f"error: could not read {sheet.name} as a spreadsheet "
+                    f"(need .xlsx/.xlsm/.csv/.tsv)")
+        header, rows = table
+        source_column = str(args.get("source_column", ""))
+        target_column = str(args.get("target_column", ""))
+        for column in (source_column, target_column):
+            if column not in header:
+                return (f"error: column {column!r} not found; headers are "
+                        f"{header}")
+        locale = str(args.get("locale", ""))
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        if locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+
+        source_index = header.index(source_column)
+        target_index = header.index(target_column)
+        # Locked is OFF unless asked for: a client sheet is a proposal
+        # until a human ratifies it, and unratified terms enforced as law
+        # report correct translations as defects.
+        lock = bool(args.get("lock"))
+        terms, skipped = {}, 0
+        for row in rows:
+            if len(row) <= max(source_index, target_index):
+                skipped += 1
+                continue
+            term = str(row[source_index]).strip()
+            rendering = str(row[target_index]).strip()
+            if not term or not rendering:
+                skipped += 1
+                continue
+            terms[term] = {
+                "translation": rendering, "type": "other", "tier": 1,
+                "locked": lock,
+                "source": f"client term sheet {sheet.name} "
+                          f"({date.today().isoformat()})"}
+        if not terms:
+            return f"error: no usable rows in {sheet.name}"
+
+        out_dir = (self._confine(str(args["out_dir"])) if args.get("out_dir")
+                   else self.project_root / "40-reference" / "glossary")
+        out = out_dir / f"glossary_terms.{locale}.json"
+        emit_rag_json(terms, out, game=intake.game, locale=locale,
+                      source_lang=intake.source_lang)
+        return json.dumps({
+            "status": "complete", "terms": len(terms), "skipped": skipped,
+            "locked": lock, "path": str(out),
+            "next": (
+                "This termbase is written and the T1 terminology check "
+                "enforces it — locked or not. `locked` records that a "
+                "HUMAN ratified the rendering: unlocked terms are checked "
+                "for term violations, but the T2 cross-corpus consistency "
+                "check speaks only for locked ones. "
+                + ("Terms are LOCKED, so both checks apply."
+                   if lock else
+                   "These are UNLOCKED, so T2 consistency will skip them "
+                   "— lock them once the client's renderings are "
+                   "confirmed.")
+                + " It is already at the per-locale path the pipeline "
+                  "resolves; no promote step is needed.")}, ensure_ascii=False)
+
+    def _t_lqa_report(self, args: dict) -> str:
+        """Build the client deliverable from a stored LQA report.
+
+        The audit was reachable from chat and the deliverable was not, so
+        every run ended with the operator dropping to a shell — which is
+        also where the locale and attempt mistakes happened, because the
+        CLI's guard rails were the only ones and they were easy to skip
+        past with --force.
+
+        Same rules as `orbit8 lqa report`: the report is found by NAME
+        across attempts, a locale disagreement is refused rather than
+        shipped, and the xlsx lands in 30-deliverables/<date>-lqa-report/.
+        """
+        import json as json_mod
+        from datetime import date
+
+        from .bug_report import (build_suggestions, load_locations,
+                                 locale_in_name, target_language_of,
+                                 write_bug_report_xlsx, write_tech_summary)
+        from .schemas import LQAReport
+
+        name = str(args.get("name") or "")
+        if not name:
+            return ("error: which audit? pass \"name\" — "
+                    + self._known_report_names())
+        artifact = f"lqa_report.{name}"
+        attempt = self.job.store.find_attempt(5, artifact)
+        if attempt is None:
+            return (f"error: no LQA report named {name!r}. "
+                    + self._known_report_names())
+        report = self.job.store.read(5, artifact, LQAReport,
+                                     attempt=attempt)
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+
+        # Refuse a mislabelled deliverable. The client already has the
+        # file by the time anyone notices, so this is the one place where
+        # stopping beats shipping.
+        warnings = []
+        named = locale_in_name(name, intake.target_locales)
+        if named and named != report.locale:
+            warnings.append(
+                f"the audit is named {name!r} but its stored locale is "
+                f"{report.locale!r}: it was SCORED against {report.locale} "
+                f"rules, so its findings do not describe {named}")
+        locations = None
+        if args.get("locations_from"):
+            loc_path = self._confine_read(str(args["locations_from"]))
+            if not loc_path.exists():
+                return f"error: no locations file at {loc_path}"
+            loc_lang = target_language_of(loc_path)
+            if loc_lang and loc_lang != report.locale:
+                warnings.append(
+                    f"locations_from is a {loc_lang} export but the report "
+                    f"is {report.locale}")
+            locations = load_locations(loc_path)
+        if warnings and not args.get("force"):
+            return json.dumps(
+                {"status": "refused", "name": name,
+                 "report_locale": report.locale, "warnings": warnings,
+                 "advice": "Tell the operator VERBATIM and stop. A "
+                           "mislabelled bug report cannot be recalled. "
+                           "Re-run the audit with the right --locale, or "
+                           "pass force:true only if the operator "
+                           "explicitly confirms the stored locale is "
+                           "correct."}, ensure_ascii=False)
+
+        suggestions = {}
+        if not args.get("no_suggestions") and not self.dry_run:
+            suggestions = build_suggestions(
+                self.provider, report.items, game=intake.game,
+                source_lang=intake.source_lang, locale=report.locale,
+                glossary=self.job._glossary(report.locale),
+                style_brief=self.job._style_or_none())
+
+        project_root = self.job.store.root.resolve().parent
+        if args.get("out_dir"):
+            # `_confine` RAISES on an escape; every other tool turns that
+            # into a message the model can act on rather than a traceback.
+            try:
+                out_dir = self._confine(str(args["out_dir"]))
+            except Exception as err:
+                return f"error: {err}"
+        else:
+            stamp = str(args.get("timestamp")
+                        or date.today().strftime("%Y%m%d"))
+            out_dir = (project_root / "30-deliverables"
+                       / f"{stamp}-lqa-report")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        slug = intake.game.replace(" ", "")
+        tag = f".{args['tag']}" if args.get("tag") else ""
+        xlsx = out_dir / f"{slug}_Bug_Report_{report.locale}{tag}.xlsx"
+        summary = out_dir / f"{slug}_LQA_Summary_{report.locale}{tag}.md"
+        split_path = (self.job.store.stage_dir(5, attempt)
+                      / f"split_summary.{name}.json")
+        split_counts = (json_mod.loads(
+            split_path.read_text(encoding="utf-8"))["split"]
+            if split_path.exists() else None)
+        count = write_bug_report_xlsx(
+            report, xlsx, suggestions=suggestions, game=intake.game,
+            locations=locations)
+        write_tech_summary(report, summary, game=intake.game,
+                           split_counts=split_counts,
+                           suggestions_count=len(suggestions))
+        # Count what the workbook actually carries, not what the Repair
+        # agent returned: the reviewer's own suggested_fix fills the
+        # column too, and reporting only the agent's total made a useful
+        # report look empty.
+        reviewer_fixes = sum(
+            1 for item in report.items for vf in item.findings
+            if vf.finding.suggested_fix and item.uid not in suggestions)
+        return json.dumps({
+            "status": "complete", "name": name, "locale": report.locale,
+            "attempt": attempt, "bug_rows": count,
+            "repair_agent_suggestions": len(suggestions),
+            "reviewer_suggestions": reviewer_fixes,
+            "block_ship": report.block_ship,
+            "by_severity": report.by_severity,
+            "xlsx": str(xlsx), "summary": str(summary),
+            "warnings": warnings}, ensure_ascii=False)
+
+    def _known_report_names(self) -> str:
+        """Available audit names — the only thing that makes a wrong
+        `name` recoverable without leaving chat."""
+        names = self.job.store.artifact_names(5)
+        found = sorted(n.split("lqa_report.", 1)[1] for n in names
+                       if n.startswith("lqa_report."))
+        if not found:
+            return "no audits have been run yet (use lqa_run first)"
+        return "available: " + ", ".join(found)
+
+    def _t_lqa_smoke(self, args: dict) -> str:
+        """Pre-flight an audit before spending a batch on it.
+
+        Cheap enough that there is no reason to skip it, and it catches
+        the failure class that a full audit reports as a flood of genuine
+        findings: a wrong resolved locale, a glossary that loaded for
+        another language, or one that did not load at all.
+        """
+        from .external_lqa import smoke_audit
+
+        pairs = self._confine_read(str(args.get("pairs", "")))
+        if not pairs.exists():
+            return f"error: no pairs file at {pairs}"
+        locale = str(args.get("locale") or "")
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        if locale and locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+        size = int(args.get("size") or 5)
+        provider = None if self.dry_run else self.provider
+        result = smoke_audit(self.job, provider, pairs, size=size,
+                             locale=locale or None)
+        return result.model_dump_json(exclude_none=True)
+
+    def _t_lqa_run(self, args: dict) -> str:
+        """Audit a bilingual JSONL through the full tier cascade.
+
+        `scan_po` reads .po only, so an agent that had just produced
+        `pairs_en-ja.jsonl` with `standardize` had nowhere to take it —
+        the cascade existed in the CLI and not in the tool set, which
+        made the conversion a dead end. This is the same
+        `run_external_lqa` the CLI calls: T1 mechanical → T2 consistency
+        → T3 semantic → verifier, attempt-versioned under s5.
+        """
+        from .external_lqa import run_external_lqa
+
+        pairs = self._confine_read(str(args.get("pairs", "")))
+        if not pairs.exists():
+            return f"error: no pairs file at {pairs}"
+        locale = str(args.get("locale") or "")
+        intake = self.job.store.read(0, "intake", IntakeBrief)
+        if locale and locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
+        deterministic = bool(args.get("deterministic_only"))
+        provider = None if (deterministic or self.dry_run) else self.provider
+        # Name the run after the locale so several audits coexist: one
+        # report per language pair is what the cascade produces, and
+        # overwriting them would lose every earlier locale's findings.
+        name = str(args.get("name") or f"{locale or 'audit'}-audit")
+        try:
+            report = run_external_lqa(
+                self.job, provider, pairs, name=name,
+                deterministic_only=deterministic or provider is None,
+                locale=locale or None)
+        except Exception as err:
+            return f"error: {type(err).__name__}: {err}"
+        # Say WHICH glossary was used, and say so when there was none.
+        # Without this, "no terminology findings" is ambiguous between
+        # "the translations are clean" and "the terminology check never
+        # had any terms" — and the second reads as a clean bill of health.
+        # `scan_po` already reports this; the omission here was an
+        # inconsistency, not a decision.
+        #
+        # Counted from `report.locale`, not the `locale` argument: when
+        # the caller omits it the cascade resolves one from the pairs
+        # file, and counting the argument reported 0 terms enforced for a
+        # run that enforced a full termbase.
+        glossary = self.job._glossary(report.locale)
+        enforced = len(glossary.locked_map()) if glossary else 0
+        return json.dumps({
+            "status": "complete", "name": name, "locale": report.locale,
+            "glossary_terms_enforced": enforced,
+            "checked": report.checked,
+            "flagged_strings": report.flagged_strings,
+            "findings_total": report.findings_total,
+            "by_severity": report.by_severity,
+            "by_bug_type": report.by_bug_type,
+            "next": (
+                (f"NO GLOSSARY was loaded for {locale or 'this locale'}, so "
+                 f"the terminology check had nothing to enforce — report "
+                 f"that plainly rather than as a clean result. Build one "
+                 f"with glossary_from_sheet. "
+                 if enforced == 0 else
+                 f"{enforced} glossary term(s) were enforced. ")
+                + f"Audit '{name}' is DONE — do not re-run it. "
+                  f"`orbit8 lqa report` turns it into a client xlsx.")},
+            ensure_ascii=False)
 
     def _t_scan_po(self, args: dict) -> str:
         from .po_scan import scan_po
@@ -674,12 +1377,27 @@ class ChatOrchestrator:
                    if args.get("out_dir")
                    else project_root / "30-deliverables")
         intake = self.job.store.read(0, "intake", IntakeBrief)
+        # Same guard as `standardize`: never guess the locale when several
+        # are configured. This wrote every delivery's renderings into
+        # target_locales[0]'s translation memory, so a ja delivery under a
+        # zh-CN-first intake poisoned the zh-CN TM with Japanese.
+        locale = str(args.get("locale") or "")
+        if not locale:
+            if len(intake.target_locales) != 1:
+                return (f"error: this job has "
+                        f"{len(intake.target_locales)} target locales "
+                        f"({', '.join(intake.target_locales)}); pass "
+                        f'"locale" to say which one this delivery is for')
+            locale = intake.target_locales[0]
+        if locale not in intake.target_locales:
+            return (f"error: {locale!r} is not a target locale of this job "
+                    f"({', '.join(intake.target_locales)})")
         report = deliver_from_review(
             review, po_files, out_dir,
             timestamp=(str(args["timestamp"])
                        if args.get("timestamp") else None),
             tm=TranslationMemory(self.job.store.tm_path()),
-            locale=intake.target_locales[0])
+            locale=locale)
         return json.dumps(
             {"counts": report.counts(), "outputs": report.outputs,
              "report": f"{report.delivery_dir}/DELIVERY_REPORT.md",
@@ -736,7 +1454,12 @@ class ChatOrchestrator:
                 "extract_glossary": self._t_extract_glossary,
                 "add_glossary_terms": self._t_add_glossary_terms,
                 "translate_po": self._t_translate_po,
-                "scan_po": self._t_scan_po}
+                "scan_po": self._t_scan_po,
+                "lqa_smoke": self._t_lqa_smoke,
+                "lqa_report": self._t_lqa_report,
+                "lqa_run": self._t_lqa_run,
+                "glossary_from_sheet":
+                    self._t_glossary_from_sheet}
 
     @classmethod
     def tool_names(cls) -> frozenset:
@@ -867,6 +1590,37 @@ class ChatOrchestrator:
         except OSError:
             pass                    # tracing must never break a session
 
+    @staticmethod
+    def _step_limit_reply(evidence: List[str]) -> str:
+        """What was accomplished, and how to pick it up.
+
+        The old message ("I hit the per-turn step limit... state is
+        unchanged") was honest and useless: it named neither what the turn
+        learned nor what to type next, so the operator restarted work the
+        agent had already done. An unfinished turn should be RESUMABLE.
+        """
+        lines = ["I reached the per-turn step limit before finishing."]
+        if evidence:
+            lines.append("\nWhat I did:")
+            for item in evidence:
+                # Each entry reads "[tool] name({args}) -> observation".
+                head = item[len("[tool] "):] if item.startswith("[tool] ") \
+                    else item
+                call, _, result = head.partition(" -> ")
+                outcome = result.strip().replace("\n", " ")
+                if outcome.startswith("error:"):
+                    summary = outcome[:100]
+                else:
+                    summary = f"ok ({len(outcome)} chars)" if len(
+                        outcome) > 120 else outcome[:120]
+                lines.append(f"  {call[:90]} → {summary}")
+        lines.append(
+            "\nThe job state is unchanged beyond those steps. Say "
+            '"continue" to resume, or narrow the request — asking for one '
+            "file or one locale at a time keeps a turn well inside the "
+            "limit.")
+        return "\n".join(lines)
+
     def _retire_evidence(self, evidence: List[str]) -> None:
         """Move this turn's tool results down into history.
 
@@ -893,7 +1647,7 @@ class ChatOrchestrator:
         evidence: List[str] = []
         # (tool, args, error) -> how many times it has failed identically.
         repeats: Dict[tuple, int] = {}
-        for _ in range(MAX_STEPS_PER_TURN):
+        for _ in range(max_steps_per_turn()):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
             call = complete_json(self.provider, SYSTEM,
@@ -952,29 +1706,37 @@ class ChatOrchestrator:
             # `failed`) and by RETURNING an "error: …" string, which most
             # of them do. Counting only exceptions would leave the second
             # kind looping exactly as before.
+            # Counting only FAILURES missed the worse loop: a tool that
+            # succeeds identically every time. Twelve `list_files` calls
+            # with the same args each returned valid JSON, so nothing
+            # tripped — and the turn died at the step limit with a generic
+            # message. Same call, same result, no new information, whether
+            # or not it "worked".
             outcome = failed or (observation
                                  if observation.startswith("error:")
                                  else None)
-            if outcome is not None:
-                signature = (call.tool,
-                             json.dumps(call.args, sort_keys=True,
-                                        default=str), outcome)
-                repeats[signature] = repeats.get(signature, 0) + 1
-                if repeats[signature] >= REPEAT_FAILURE_LIMIT:
-                    reply = (
-                        f"Stopping: `{call.tool}` failed the same way "
-                        f"{repeats[signature]} times and retrying cannot "
-                        f"change that.\n\n{observation}")
-                    self._retire_evidence(evidence)
-                    self.history.append(("operator", user_msg))
-                    self.history.append(("orbit8", reply))
-                    self._trace("abort", reason="repeated_failure",
-                                tool=call.tool, error=outcome)
-                    return reply
+            signature = (call.tool,
+                         json.dumps(call.args, sort_keys=True, default=str),
+                         outcome if outcome is not None else observation)
+            repeats[signature] = repeats.get(signature, 0) + 1
+            limit = (REPEAT_FAILURE_LIMIT if outcome is not None
+                     else REPEAT_SUCCESS_LIMIT)
+            if repeats[signature] >= limit:
+                verb = ("failed the same way" if outcome is not None
+                        else "returned the same result")
+                reply = (
+                    f"Stopping: `{call.tool}` {verb} "
+                    f"{repeats[signature]} times and repeating it "
+                    f"cannot change that.\n\n{observation}")
+                self._retire_evidence(evidence)
+                self.history.append(("operator", user_msg))
+                self.history.append(("orbit8", reply))
+                self._trace("abort", reason="repeated_call",
+                            tool=call.tool, error=outcome)
+                return reply
+        reply = self._step_limit_reply(evidence)
         self._retire_evidence(evidence)
         self.history.append(("operator", user_msg))
-        reply = ("I hit the per-turn step limit before finishing — the job "
-                 "state is unchanged beyond the steps shown above. Ask me "
-                 "to continue if you want more.")
         self.history.append(("orbit8", reply))
+        self._trace("abort", reason="step_limit", steps=len(evidence))
         return reply

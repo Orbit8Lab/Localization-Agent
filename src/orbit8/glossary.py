@@ -61,13 +61,27 @@ class Glossary:
     # ------------------------------------------------------------ queries
 
     def locked_map(self, locked_only: bool = False) -> Dict[str, str]:
-        """source term -> locked rendering, for the deterministic gate.
+        """source term -> rendering, for the deterministic gate.
         Only T1 terms are hard gate constraints; T2/T3 steer prompts.
 
         ``locked_only`` restricts the map to entries a human actually
-        ratified. A T1 file is mostly MINED terms — the termbase's best
-        guess — and enforcing those as law reports correct translations
-        as defects.
+        ratified.
+
+        The two callers differ ON PURPOSE, and the difference is easy to
+        misread as a bug:
+
+        - the **T1 term check** (controller, external_lqa) passes NOTHING,
+          so every tier-1 term is enforced. A tier-1 entry got there by a
+          deliberate act — a publisher's glossary, an operator's ruling —
+          and is authoritative on arrival.
+        - the **T2 consistency check** (graphs/lqa.py) passes
+          ``locked_only=True``. It flags a term rendered inconsistently
+          ACROSS the corpus, which is a much stronger claim, so it speaks
+          only for renderings a human ratified.
+
+        So ``locked`` is provenance — "a human signed off on this" — not a
+        switch that turns enforcement on. An unlocked termbase still
+        produces T1 terminology findings.
         """
         return {t.term: t.translation for t in self.terms.values()
                 if t.tier == 1 and (t.locked or not locked_only)}
@@ -78,13 +92,30 @@ class Glossary:
         return entry.translation if entry else None
 
     def brief_for(self, texts: List[str]) -> GlossaryBrief:
-        """Per-batch slice: only terms matched in the batch source,
-        longest-match-first so compound terms surface before their parts."""
-        matched: List[TermBrief] = []
-        for entry in sorted(self.terms.values(),
-                            key=lambda t: len(t.term), reverse=True):
-            if any(term_in_text(entry.term, text) for text in texts):
-                matched.append(entry)
+        """Per-batch slice: only the terms a batch is actually subject to.
+
+        Nested entries are resolved by longest match, the same rule the
+        deterministic gate applies (`gate_checks.applicable_terms`), so
+        the prompt and the gate cannot disagree about which term governs
+        a span. Sorting alone was not enough: a sentence containing
+        "Autumn Spirit Guardian" used to show the model SIX renderings —
+        'Autumn Spirit Guardian', 'Spirit Guardian', 'Guardian' and
+        'spirit' among them — four of which do not apply, inviting the
+        translator to use 灵体 inside 秋之守护灵 and the reviewer to file a
+        terminology defect when it is absent.
+
+        A shorter term still appears when it occurs somewhere the longer
+        one does not cover, because there it genuinely applies.
+        """
+        from .gate_checks import applicable_terms
+        renderings = {t.term: t.translation for t in self.terms.values()}
+        governing: set = set()
+        for text in texts:
+            governing |= set(applicable_terms(text, renderings))
+        matched = [entry for entry in sorted(self.terms.values(),
+                                             key=lambda t: len(t.term),
+                                             reverse=True)
+                   if entry.term in governing]
         return GlossaryBrief(game=self.game, locale=self.locale,
                              asset_version=self.asset_version, terms=matched)
 

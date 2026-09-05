@@ -59,6 +59,66 @@ def _cmd_init(args) -> int:
     return 0
 
 
+def _cmd_smoke(args) -> int:
+    """Pre-flight before a large batch: real model, a few strings per
+    locale, nothing written to the job.
+
+    Exit codes are the point — this is meant to gate a batch in a script:
+    0 = safe to launch, 1 = at least one locale failed."""
+    job = Job(Path(args.root), args.job_id)
+    factory = None
+    if not args.dry_run:
+        factory = lambda locale: OpenAICompatProvider(
+            args.provider, model=args.model, api_key=args.api_key)
+    try:
+        results = job.smoke(factory, size=args.size,
+                            locales=(args.locales.split(",")
+                                     if args.locales else None))
+    except ValueError as err:
+        print(f"✗ {err}", file=sys.stderr)
+        return 1
+
+    total_projection = 0.0
+    for r in results:
+        mark = "✓" if r.ok else "✗"
+        print(f"\n{mark} {r.locale}  ({r.source_lang} → {r.target_lang})")
+        print(f"    sampled:  {r.sampled} of {r.pending_total} pending"
+              f"   {r.elapsed_s}s")
+        print(f"    glossary: {r.glossary_terms} terms "
+              f"[{r.glossary_source}]"
+              f"   style brief: {'yes' if r.style_brief else 'no'}")
+        if r.provider:
+            print(f"    provider: {r.provider}"
+                  + (f" / {r.model}" if r.model else ""))
+        if r.error:
+            print(f"    error:    {r.error}")
+        for w in r.warnings:
+            print(f"    ! {w}")
+        # The samples are the deliverable. A reviewer catching a
+        # wrong-language or empty rendering here saves the whole batch.
+        for sample in r.samples:
+            print(f"      {sample['uid']}  {sample['source'][:44]}")
+            print(f"            → {sample['target'][:44]}"
+                  f"   [{sample['status']}]")
+        projection = r.cost_projection()
+        total_projection += projection
+        if projection:
+            print(f"    projected batch cost: ~{projection:,.0f} tokens "
+                  f"({r.tokens_spent:,.0f} for {r.sampled})")
+
+    failed = [r.locale for r in results if not r.ok]
+    print()
+    if total_projection:
+        print(f"projected total: ~{total_projection:,.0f} tokens")
+    if failed:
+        sys.stdout.flush()
+        print(f"✗ SMOKE FAILED: {', '.join(failed)} — do not launch the "
+              f"batch", file=sys.stderr)
+        return 1
+    print("✓ smoke passed — review the samples above before launching")
+    return 0
+
+
 def _cmd_next(args) -> int:
     job = Job(Path(args.root), args.job_id)
     factory = None
@@ -158,16 +218,23 @@ def _cmd_lqa_run(args) -> int:
     """Audit external translations (docs/skills/lqa-batch-split.md):
     content-classify → split story/strings files → tier cascade with
     per-class batch sizes."""
-    from .external_lqa import run_external_lqa
+    from .external_lqa import LocaleConflict, run_external_lqa
     job = Job(Path(args.root), args.job_id)
     provider = (None if args.deterministic_only else
                 OpenAICompatProvider(args.provider, model=args.model,
                                      api_key=args.api_key))
-    report = run_external_lqa(
-        job, provider, Path(args.pairs), name=args.name,
-        batch_story=args.batch_story, batch_string=args.batch_string,
-        t3_threshold=args.t3_threshold,
-        deterministic_only=args.deterministic_only)
+    try:
+        report = run_external_lqa(
+            job, provider, Path(args.pairs), name=args.name,
+            batch_story=args.batch_story, batch_string=args.batch_string,
+            t3_threshold=args.t3_threshold,
+            deterministic_only=args.deterministic_only, locale=args.locale)
+    except LocaleConflict as err:
+        print(f"✗ {err}", file=sys.stderr)
+        return 1
+    # First line of output: an audit scored against the wrong language is
+    # the one failure that looks like a flood of real findings.
+    print(f"locale:   {report.locale}")
     if report.cascade_ledger:
         print(f"cascade:  {json.dumps(report.cascade_ledger)}")
     if report.t3_stats:
@@ -181,13 +248,65 @@ def _cmd_lqa_run(args) -> int:
         print(f"severity: {json.dumps(report.by_severity)}")
     if report.by_bug_type:
         print(f"bug type: {json.dumps(report.by_bug_type)}")
-    attempt = job.store.latest_attempt(5)
-    print(f"report:   {job.store.stage_dir(5, attempt)}/"
-          f"lqa_report.{args.name}.json")
+    # Locate the report by NAME. This run opened its own attempt, and
+    # concurrent or subsequent runs make "the latest attempt" the wrong
+    # answer for this report.
+    name = f"lqa_report.{args.name}"
+    attempt = job.store.find_attempt(5, name) or job.store.latest_attempt(5)
+    print(f"report:   {job.store.stage_dir(5, attempt)}/{name}.json")
+    # The name is what `lqa report` needs next, and there is no other
+    # place the operator can learn it.
+    print(f"next:     orbit8 lqa report {args.root} {args.job_id} "
+          f"--name {args.name}")
     if report.block_ship:
         print("✋ BLOCK SHIP: high-severity findings survived review")
         return 2
     return 0
+
+
+def _cmd_lqa_smoke(args) -> int:
+    """Pre-flight before a full audit. Exit 1 on failure so a script can
+    gate the batch on it."""
+    from .external_lqa import smoke_audit
+    job = Job(Path(args.root), args.job_id)
+    provider = (None if args.deterministic_only else
+                OpenAICompatProvider(args.provider, model=args.model,
+                                     api_key=args.api_key))
+    r = smoke_audit(job, provider, Path(args.pairs), size=args.size,
+                    locale=args.locale)
+    print(f"locale:   {r.locale or '(unresolved)'}  "
+          f"({r.source_lang} → {r.target_lang or '?'})")
+    print(f"pairs:    {r.sampled} sampled of {r.pending_total}"
+          f"   {r.elapsed_s}s")
+    print(f"glossary: {r.glossary_terms} terms [{r.glossary_source}]"
+          f"   style brief: {'yes' if r.style_brief else 'no'}")
+    if r.provider:
+        print(f"provider: {r.provider}"
+              + (f" / {r.model}" if r.model else ""))
+    if r.error:
+        # Flush first: stderr and stdout interleave in a terminal, and an
+        # error printed above its own context reads as unrelated.
+        sys.stdout.flush()
+        print(f"\n✗ {r.error}", file=sys.stderr)
+        return 1
+    for w in r.warnings:
+        print(f"! {w}")
+    print("\nsampled pairs:")
+    for sample in r.samples:
+        print(f"  {sample['source'][:52]}")
+        print(f"    → {sample['target'][:52]}")
+    if r.findings:
+        print(f"\nfindings on the sample ({len(r.findings)}):")
+        for f in r.findings[:10]:
+            print(f"  [{f['severity']}] {f['bug_type']}: {f['message']}")
+    else:
+        print("\nno findings on the sample")
+    if not r.ok:
+        return 1
+    print("\n✓ smoke passed — read the samples and findings above, then "
+          "launch")
+    return 0
+
 
 
 def _cmd_lqa_report(args) -> int:
@@ -195,14 +314,36 @@ def _cmd_lqa_report(args) -> int:
     bug-report-builder): xlsx + technical summary, Repair-agent
     suggestions, round-trip safe."""
     import json as json_mod
+    from datetime import date
     from .bug_report import (build_suggestions, load_locations,
+                             locale_in_name, target_language_of,
                              write_bug_report_xlsx, write_tech_summary)
-    from .schemas import LQAReport, StyleBrief
+    from .schemas import LQAReport
     job = Job(Path(args.root), args.job_id)
     intake = job.store.read(0, "intake", IntakeBrief)
-    attempt = args.attempt or job.store.latest_attempt(5)
-    report = job.store.read(5, f"lqa_report.{args.name}", LQAReport,
-                            attempt=attempt)
+    # Find the attempt HOLDING this report, don't assume the newest one
+    # has it. Every `lqa run` opens its own attempt, so auditing four
+    # locales leaves four attempts each holding one locale's report — and
+    # defaulting to the latest made every earlier locale unreadable.
+    name = f"lqa_report.{args.name}"
+    attempt = args.attempt or job.store.find_attempt(5, name)
+    if attempt is None:
+        available = job.store.artifact_names(5)
+        reports = {n.split("lqa_report.", 1)[1]: a
+                   for n, a in sorted(available.items())
+                   if n.startswith("lqa_report.")}
+        print(f"✗ no LQA report named {args.name!r} in this job",
+              file=sys.stderr)
+        if reports:
+            print("\navailable reports:", file=sys.stderr)
+            for report_name, attempts in reports.items():
+                shown = ", ".join(f"attempt-{a:02d}" for a in attempts)
+                print(f"  --name {report_name}   ({shown})",
+                      file=sys.stderr)
+        else:
+            print("  (none — run `orbit8 lqa run` first)", file=sys.stderr)
+        return 1
+    report = job.store.read(5, name, LQAReport, attempt=attempt)
     split_counts = None
     split_path = (job.store.stage_dir(5, attempt)
                   / f"split_summary.{args.name}.json")
@@ -218,14 +359,65 @@ def _cmd_lqa_report(args) -> int:
             provider, report.items, game=intake.game,
             source_lang=intake.source_lang, locale=report.locale,
             glossary=job._glossary(report.locale),
-            style_brief=job._style())
+            # Tolerant reader: an EXTERNAL audit never ran
+            # CONTEXT, so there is no s2 brief — the strict
+            # one raised and made the report unbuildable for
+            # exactly the jobs that need it most.
+            style_brief=job._style_or_none())
 
     locations = (load_locations(Path(args.locations_from))
                  if args.locations_from else None)
 
+    # A report's stored `locale` names the deliverable, so a wrong one
+    # ships a mislabelled file to the client. Two cheap cross-checks:
+    #
+    # 1. the run's NAME usually carries its locale (`lqa-ja-20260830`),
+    #    and disagreeing with the stored locale is the signature of an
+    #    audit that resolved its locale from the intake order rather than
+    #    its input — the bug that reviewed Japanese under zh-CN rules.
+    # 2. `--locations-from` is a bilingual export stamped with its own
+    #    `target_language`; pairing it with another locale's report
+    #    produces a bug report whose locations belong to a different file.
+    warnings = []
+    named = locale_in_name(args.name, intake.target_locales)
+    if named and named != report.locale:
+        warnings.append(
+            f"the run is named {args.name!r} but the stored report says "
+            f"locale={report.locale!r}. This report was AUDITED as "
+            f"{report.locale}: its findings were scored against "
+            f"{report.locale} rules and its glossary, so they do not "
+            f"describe {named}. Re-run: orbit8 lqa run ... --locale {named}")
+    if args.locations_from:
+        loc_lang = target_language_of(Path(args.locations_from))
+        if loc_lang and loc_lang != report.locale:
+            warnings.append(
+                f"--locations-from is a {loc_lang} export but the report "
+                f"is {report.locale}; the locations would be attached to "
+                f"another locale's rows")
+    if warnings:
+        for warning in warnings:
+            print(f"! {warning}", file=sys.stderr)
+        if not args.force:
+            print("\n✗ refusing to write a mislabelled deliverable "
+                  "(--force to override)", file=sys.stderr)
+            return 1
+
     slug = intake.game.replace(" ", "")
-    out_dir = (Path(args.out) if args.out
-               else job.store.stage_dir(5, attempt))
+    # Deliverables belong in 30-deliverables, not buried in an s5 attempt
+    # folder. The attempt dir is INTERNAL run state — its name encodes
+    # nothing a client understands, and finding the right one meant
+    # knowing which attempt an audit happened to open. Same layout as
+    # `lqa deliver` (po_patch): a dated subfolder, so successive audits
+    # of the same game sit side by side instead of overwriting.
+    if args.out:
+        out_dir = Path(args.out)
+    elif args.in_place:
+        out_dir = job.store.stage_dir(5, attempt)
+    else:
+        stamp = args.timestamp or date.today().strftime("%Y%m%d")
+        out_dir = (Path(args.root).resolve().parent / "30-deliverables"
+                   / f"{stamp}-lqa-report")
+    out_dir.mkdir(parents=True, exist_ok=True)
     tag = f".{args.tag}" if args.tag else ""
     xlsx = out_dir / f"{slug}_Bug_Report_{report.locale}{tag}.xlsx"
     summary = out_dir / f"{slug}_LQA_Summary_{report.locale}{tag}.md"
@@ -790,6 +982,90 @@ def _cmd_glossary_check(args) -> int:
     return 1 if report.blocked else 0
 
 
+def _cmd_glossary_from_sheet(args) -> int:
+    """A client's term sheet → the T1 termbase the gate actually reads.
+
+    `standardize` produces bilingual PAIRS, which is the LQA input shape;
+    the deterministic gate needs the T1 `{metadata, terms}` termbase, and
+    nothing bridged the two. So a project could have a perfectly good
+    glossary sitting in 40-reference/ and still run its LQA with ZERO
+    locked terms — the terminology check silently finding nothing, which
+    is the check a glossary-driven client cares about most.
+
+    Terms are written LOCKED only when `--lock` is given. A client sheet
+    is a proposal until someone ratifies it: enforcing every row as law
+    reports correct translations as defects, and the sheet may itself
+    carry errors (an observed one had a term whose Traditional Chinese
+    column held an unrelated word).
+    """
+    from datetime import date
+
+    from .glossary_import import emit_rag_json
+    from .orchestrator import ChatOrchestrator
+
+    sheet = Path(args.sheet)
+    if not sheet.exists():
+        print(f"no such file: {sheet}", file=sys.stderr)
+        return 2
+    table = ChatOrchestrator._read_table(sheet)
+    if table is None:
+        print(f"could not read {sheet.name} as a spreadsheet "
+              f"(need .xlsx/.xlsm/.csv/.tsv)", file=sys.stderr)
+        return 2
+    header, rows = table
+    for column in (args.source_column, args.target_column):
+        if column not in header:
+            print(f"column {column!r} not found; headers are {header}",
+                  file=sys.stderr)
+            return 2
+    source_index = header.index(args.source_column)
+    target_index = header.index(args.target_column)
+
+    terms, skipped = {}, 0
+    for row in rows:
+        if len(row) <= max(source_index, target_index):
+            skipped += 1
+            continue
+        term = str(row[source_index]).strip()
+        rendering = str(row[target_index]).strip()
+        if not term or not rendering:
+            skipped += 1
+            continue
+        terms[term] = {
+            "translation": rendering,
+            "type": "other",
+            "tier": 1,
+            # Locked = law. Off by default: a client sheet is a proposal
+            # until a human ratifies it, and mined-but-unratified entries
+            # enforced as law turn correct strings into reported defects.
+            "locked": bool(args.lock),
+            "source": f"client term sheet {sheet.name} "
+                      f"({date.today().isoformat()})",
+        }
+    if not terms:
+        print(f"no usable rows in {sheet.name}", file=sys.stderr)
+        return 2
+
+    out = Path(args.out) if args.out else (
+        sheet.parent / f"glossary_terms.{args.locale}.json")
+    emit_rag_json(terms, out, game=args.game, locale=args.locale,
+                  source_lang=args.source_lang)
+    print(f"{len(terms)} term(s) → {out}")
+    if skipped:
+        print(f"  {skipped} row(s) skipped (missing term or rendering)")
+    print(f"  locked: {bool(args.lock)}")
+    print("  The T1 terminology check enforces these either way; `locked` "
+          "records that a\n  human ratified the rendering, and the T2 "
+          "cross-corpus consistency check\n  speaks only for locked terms.")
+    if out.name.startswith("glossary_terms.") and out.name != "glossary_terms.json":
+        print("\nAlready at the per-locale path the pipeline resolves — no "
+              "promote step needed.")
+    else:
+        print(f"\nMake it the project's active termbase:\n"
+              f"  uv run orbit8 glossary promote {out}")
+    return 0
+
+
 def _cmd_glossary_promote(args) -> int:
     """Publish a run's glossary as the project's active termbase
     (40-reference/glossary/) so every later stage resolves the same
@@ -1003,11 +1279,18 @@ def _cmd_new(args) -> int:
     written until a human says yes, and validation runs before they are
     asked, so an obviously wrong locale never reaches the prompt.
     """
-    from .intake_wizard import propose_intake, render, review, to_intake
+    from .intake_wizard import propose_intake, render, to_intake
 
     from .project_paths import discover_sources, scaffold_project
 
+    # `orbit8 new` takes the PROJECT folder; the jobs root is `jobs/`
+    # inside it. These are different things and conflating them breaks the
+    # file boundary: the project root is derived as the PARENT of the jobs
+    # root, so a job created directly under the project folder makes its
+    # parent (the folder holding every client's project) the agent's
+    # readable ground.
     root = Path(args.root)
+    jobs_root = root / "jobs"
     if not root.exists():
         root.mkdir(parents=True)
         print(f"created {root}")
@@ -1096,14 +1379,65 @@ def _cmd_new(args) -> int:
         print("cancelled — nothing was created")
         return 1
 
-    job = Job.init(root, result.proposal.job_id,
+    from .tenancy import mixed_tenant_warning
+    warning = mixed_tenant_warning(jobs_root, args.tenant)
+    if warning:
+        print(warning, file=sys.stderr)
+    job = Job.init(jobs_root, result.proposal.job_id,
                    intake=to_intake(result.proposal, tenant_id=args.tenant),
                    source_files=sources,
                    pilot_size=args.pilot_size)
     print(f"\njob initialized: {job.store.job_dir}")
     _print_stage(job.derive())
-    print(f"\nNext:  uv run orbit8 next {root} {result.proposal.job_id} "
+    print(f"\nNext:  uv run orbit8 next {jobs_root} {result.proposal.job_id} "
           f"--dry-run")
+    return 0
+
+
+def _cmd_set_source(args) -> int:
+    """Point an existing job at its source file(s).
+
+    A job is routinely created before the strings exist — the folder is
+    made when the client signs, the drop arrives later — and a source
+    often has to be CONVERTED first (a .csv or .xlsx standardized into
+    flat JSON). Without this the only way to attach the result was to
+    delete the job and redo the intake, which throws away the gate
+    approvals and artifacts already earned.
+
+    Only `source_files` changes; the intake artifact and every approval
+    stay exactly as they were.
+    """
+    job = Job(Path(args.root), args.job_id)
+    if not job.store.job_json.exists():
+        print(f"no job at {args.root}/{args.job_id}", file=sys.stderr)
+        return 2
+
+    resolved = []
+    for raw in args.source:
+        path = Path(raw)
+        if not path.exists():
+            print(f"source file not found: {path}", file=sys.stderr)
+            return 2
+        resolved.append(str(path.resolve()))
+
+    control = job.control
+    previous = control.get("source_files") or []
+    if previous and not args.replace:
+        # Silently discarding a configured source would make a re-run
+        # ingest something different from what the artifacts record.
+        print(f"job already has {len(previous)} source file(s):",
+              file=sys.stderr)
+        for path in previous:
+            print(f"  {path}", file=sys.stderr)
+        print("pass --replace to change them", file=sys.stderr)
+        return 2
+
+    control["source_files"] = resolved
+    job.store.save_control(control)
+    print(f"source set for {args.job_id}:")
+    for path in resolved:
+        print(f"  {path}")
+    _print_stage(job.derive())
     return 0
 
 
@@ -1527,12 +1861,30 @@ def main(argv=None) -> int:
                           help="jobs root directory (default: ./jobs)")
     job_list.set_defaults(func=_cmd_job_list)
 
+    set_source = job_sub.add_parser(
+        "set-source",
+        help="point an existing job at its source file(s) — for a job "
+             "created before the strings arrived, or after converting a "
+             "csv/xlsx with `standardize`")
+    set_source.add_argument("root", help="jobs root directory")
+    set_source.add_argument("job_id")
+    set_source.add_argument("source", nargs="+",
+                            help="source files (.json / .po / any format "
+                                 "the adapter-writer can handle)")
+    set_source.add_argument("--replace", action="store_true",
+                            help="overwrite sources already configured")
+    set_source.set_defaults(func=_cmd_set_source)
+
     init = job_sub.add_parser("init", help="create a job from an intake form")
     init.add_argument("root", help="jobs root directory")
     init.add_argument("job_id")
     init.add_argument("--game", required=True)
-    init.add_argument("--source", required=True, nargs="+",
-                      help="source files (.json / .po)")
+    # Optional, matching `orbit8 new`: a job with no strings yet is a valid
+    # state that waits at INTAKE, and only S1 needs the source. Attach one
+    # later with `orbit8 job set-source`.
+    init.add_argument("--source", nargs="+", default=[],
+                      help="source files (.json / .po); may be added later "
+                           "with `orbit8 job set-source`")
     init.add_argument("--source-lang", default="zh")
     init.add_argument("--targets", required=True,
                       help="comma-separated locales")
@@ -1545,6 +1897,25 @@ def main(argv=None) -> int:
     init.add_argument("--pilot-size", type=int, default=30)
     init.add_argument("--tester-hours", type=float, default=8.0)
     init.set_defaults(func=_cmd_init)
+
+    smoke = sub.add_parser(
+        "smoke", help="pre-flight: real model on a few strings per locale, "
+                      "nothing written; exit 1 if any locale fails")
+    smoke.add_argument("root")
+    smoke.add_argument("job_id")
+    smoke.add_argument("--size", type=int, default=5,
+                       help="strings per locale (default 5)")
+    smoke.add_argument("--locales",
+                       help="comma-separated subset (default: all job "
+                            "target locales)")
+    smoke.add_argument("--provider", default="deepseek",
+                       choices=sorted(PROVIDER_PRESETS))
+    smoke.add_argument("--model")
+    smoke.add_argument("--api-key")
+    smoke.add_argument("--dry-run", action="store_true",
+                       help="EchoProvider instead of the real model: checks "
+                            "plumbing and config, NOT prompts")
+    smoke.set_defaults(func=_cmd_smoke)
 
     nxt = sub.add_parser("next",
                          help="run the next step, or print the pending gate")
@@ -1591,6 +1962,11 @@ def main(argv=None) -> int:
     lrun.add_argument("--pairs", required=True,
                       help="bilingual JSONL (key/source_text/target_text)")
     lrun.add_argument("--name", default="dev-audit")
+    lrun.add_argument("--locale",
+                      help="language being audited (ja, ko, zh-Hant). "
+                           "Default: the pairs file's own target_language, "
+                           "else the first intake target locale. Refused if "
+                           "it contradicts the pairs file")
     lrun.add_argument("--batch-story", type=int, default=5)
     lrun.add_argument("--batch-string", type=int, default=20)
     lrun.add_argument("--t3-threshold", type=float, default=0.75,
@@ -1606,16 +1982,48 @@ def main(argv=None) -> int:
     lrun.add_argument("--api-key")
     lrun.set_defaults(func=_cmd_lqa_run)
 
+    lsmoke = lsub.add_parser(
+        "smoke", help="pre-flight an audit: resolve the locale, load the "
+                      "glossary, review a few real pairs; nothing written")
+    lsmoke.add_argument("root")
+    lsmoke.add_argument("job_id")
+    lsmoke.add_argument("--pairs", required=True)
+    lsmoke.add_argument("--locale",
+                        help="same precedence as `lqa run`; a contradiction "
+                             "with the pairs file is reported here")
+    lsmoke.add_argument("--size", type=int, default=5)
+    lsmoke.add_argument("--deterministic-only", action="store_true",
+                        help="T1+T2 only; checks config, NOT the reviewer "
+                             "prompt")
+    lsmoke.add_argument("--provider", default="deepseek",
+                        choices=sorted(PROVIDER_PRESETS))
+    lsmoke.add_argument("--model")
+    lsmoke.add_argument("--api-key")
+    lsmoke.set_defaults(func=_cmd_lqa_smoke)
+
     lreport = lsub.add_parser(
         "report", help="client bug report xlsx + tech summary from a "
                        "stored LQA report")
     lreport.add_argument("root")
     lreport.add_argument("job_id")
     lreport.add_argument("--name", default="dev-audit")
+    lreport.add_argument("--force", action="store_true",
+                         help="write the deliverable even when the run "
+                              "name, the report's stored locale and "
+                              "--locations-from disagree")
     lreport.add_argument("--attempt", type=int,
-                         help="s5 attempt (default: latest)")
-    lreport.add_argument("--out", help="output dir (default: the s5 "
-                                       "attempt dir)")
+                         help="s5 attempt (default: the newest one that "
+                              "actually holds --name; each `lqa run` "
+                              "opens its own attempt)")
+    lreport.add_argument("--out",
+                         help="output dir (default: <project>/"
+                              "30-deliverables/<date>-lqa-report/)")
+    lreport.add_argument("--in-place", action="store_true",
+                         help="write beside the artifact in the s5 attempt "
+                              "dir instead of 30-deliverables")
+    lreport.add_argument("--timestamp",
+                         help="YYYYMMDD for the deliverable folder name "
+                              "(default: today)")
     lreport.add_argument("--no-suggestions", action="store_true",
                          help="skip Repair-agent suggested translations "
                               "(zero LLM calls)")
@@ -1856,6 +2264,31 @@ def main(argv=None) -> int:
                       help="default: the project's active termbase")
     gvar.add_argument("--origin")
     gvar.set_defaults(func=_cmd_glossary_variants)
+
+    gsheet = gsub.add_parser(
+        "from-sheet",
+        help="client term sheet (xlsx/csv) → T1 termbase the gate reads "
+             "— the shape `standardize` does NOT produce")
+    gsheet.add_argument("sheet", help="the term sheet")
+    gsheet.add_argument("--source-column", required=True,
+                        help='header of the source column, e.g. "English"')
+    gsheet.add_argument("--target-column", required=True,
+                        help='header of the target column, e.g. "日本語"')
+    gsheet.add_argument("--locale", required=True,
+                        help="target locale for these renderings (ja, ko, "
+                             "zh-CN, zh-TW)")
+    gsheet.add_argument("--source-lang", default="en")
+    gsheet.add_argument("--game", default="")
+    gsheet.add_argument("--out", help="output path (default: beside the "
+                                      "sheet)")
+    gsheet.add_argument("--lock", action="store_true",
+                        help="mark terms as human-ratified. The T1 "
+                             "terminology check enforces them either way; "
+                             "locking additionally enables the T2 "
+                             "cross-corpus consistency check, which makes "
+                             "a stronger claim and so speaks only for "
+                             "renderings someone signed off on")
+    gsheet.set_defaults(func=_cmd_glossary_from_sheet)
 
     gpro = gsub.add_parser(
         "promote", help="publish a run's glossary as the project's "

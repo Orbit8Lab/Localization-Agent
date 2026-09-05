@@ -84,11 +84,56 @@ def test_out_of_order_approve_is_an_error_observation(job: Job):
     assert "error" in provider.prompts[1].lower()   # error surfaced as data
 
 
-def test_unknown_tool_and_step_cap(job: Job):
+def test_unknown_tool_is_reported_to_the_model(job: Job):
     provider = ScriptedProvider(
         [_call("delete_everything")] +              # not in the tool set
-        [_call("status")] * 13)                     # never responds
+        [_call("respond", message="I cannot do that")])
     chat = ChatOrchestrator(job, provider, operator="tian", dry_run=True)
-    reply = chat.turn("do something weird")
+    chat.turn("do something weird")
     assert "unknown tool" in provider.prompts[1]
-    assert "step limit" in reply                    # hard cap, honest reply
+
+
+def test_the_step_limit_reply_says_what_was_done(job: Job):
+    """The old message named neither what the turn learned nor what to
+    type next, so the operator restarted work already done. An unfinished
+    turn should be resumable."""
+    reply = ChatOrchestrator._step_limit_reply([
+        '[tool] list_files({"dir": "10-received"}) -> ["a.xlsx", "b.xlsx"]',
+        '[tool] standardize({"files": ["a.xlsx"]}) -> error: bad format',
+    ])
+    assert "list_files" in reply and "standardize" in reply
+    assert "error: bad format" in reply          # failures stay visible
+    assert "continue" in reply                   # and how to resume
+
+
+def test_a_long_result_is_summarised_not_dumped(job: Job):
+    """The summary must stay readable — replaying 12KB of tool output
+    would bury the one line that matters."""
+    reply = ChatOrchestrator._step_limit_reply(
+        ['[tool] inspect_file({"path": "big.po"}) -> ' + "x" * 5000])
+    assert "5000 chars" in reply
+    assert "xxxxxxxxxx" not in reply
+
+
+def test_the_step_cap_is_env_overridable(monkeypatch):
+    """Tunable per box for the same reason as the context budget: what
+    counts as a long turn depends on the project."""
+    from orbit8.orchestrator import MAX_STEPS_PER_TURN, max_steps_per_turn
+    monkeypatch.delenv("ORBIT8_MAX_STEPS", raising=False)
+    assert max_steps_per_turn() == MAX_STEPS_PER_TURN
+    monkeypatch.setenv("ORBIT8_MAX_STEPS", "30")
+    assert max_steps_per_turn() == 30
+    monkeypatch.setenv("ORBIT8_MAX_STEPS", "nonsense")
+    assert max_steps_per_turn() == MAX_STEPS_PER_TURN
+
+
+def test_repeating_one_call_stops_before_the_step_cap(job: Job):
+    """This used to run to the 14-step limit and report "step limit",
+    which hid WHY. A tool called repeatedly with identical args returns
+    identical results — no new information — so the turn now stops and
+    says so, whether or not the call "succeeded"."""
+    provider = ScriptedProvider([_call("status")] * 14)
+    chat = ChatOrchestrator(job, provider, operator="tian", dry_run=True)
+    reply = chat.turn("check the status forever")
+    assert "returned the same result" in reply
+    assert len(provider.prompts) < 14                # stopped early

@@ -153,3 +153,29 @@ def test_file_tools_confined_to_project(tmp_path: Path):
     assert "error" in observation.lower()
     assert "/etc/passwd" in observation
     assert "outside" in observation
+
+
+def test_an_input_file_path_is_not_a_location(tmp_path: Path):
+    """A generated adapter has no widget information, and some fill
+    `location` with the source workbook's own path. It is identical on
+    every row, useless to a developer, and it rode into the client bug
+    report's String ID column carrying our internal directory layout:
+
+        u0525 :: /workspace/project/project004-Nomori/10-received/
+                 20260829-drop/Nomori_Yarn (Source).xlsx :: line:04b3c45
+    """
+    from orbit8.exports import _is_file_path
+    assert _is_file_path("/workspace/project/p004/10-received/Src.xlsx")
+    assert _is_file_path("C:\\clients\\Strings.csv")
+    assert _is_file_path("strings.po")
+
+
+def test_a_real_ue_reference_survives(tmp_path: Path):
+    """The discriminator is the DOCUMENT EXTENSION, not a leading slash:
+    a UE reference is absolute too, so "starts with /" would have
+    discarded exactly the locations this column exists for."""
+    from orbit8.exports import _is_file_path
+    assert not _is_file_path(
+        "/Game/UI/WDG_Menu.WDG_Menu_C:WidgetTree.TextBlock_0.Text")
+    assert not _is_file_path("Content/UI/Menu.uasset")
+    assert not _is_file_path("WBP_Inventory/Text_Qty")

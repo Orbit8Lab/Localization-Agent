@@ -63,6 +63,95 @@ def test_the_refusal_does_not_need_an_api_key(tmp_path, monkeypatch, capsys):
     assert "no job at" in capsys.readouterr().err
 
 
+# ------------------------------------------------ attaching a source later
+
+def test_a_job_can_be_created_without_a_source(tmp_path, capsys):
+    """A job with no strings yet is a valid state — it waits at INTAKE, and
+    only S1 needs the source. `--source` was required, which made the
+    common case (project set up before the client's drop arrives)
+    impossible from the CLI."""
+    assert main(["job", "init", str(tmp_path / "jobs"), "later-ko",
+                 "--game", "G", "--targets", "ko"]) == 0
+    assert (tmp_path / "jobs" / "later-ko" / "job.json").exists()
+
+
+def test_a_source_can_be_attached_afterwards(tmp_path):
+    """The gap this closes: a csv/xlsx has to be standardized FIRST, and
+    without this the only way to attach the result was to delete the job
+    and redo the intake — throwing away gate approvals already earned."""
+    source = tmp_path / "strings.json"
+    source.write_text('{"K":"开始"}', encoding="utf-8")
+    main(["job", "init", str(tmp_path / "jobs"), "later-ko",
+          "--game", "G", "--targets", "ko"])
+
+    assert main(["job", "set-source", str(tmp_path / "jobs"), "later-ko",
+                 str(source)]) == 0
+    control = json.loads(
+        (tmp_path / "jobs" / "later-ko" / "job.json").read_text())
+    assert control["source_files"] == [str(source.resolve())]
+
+
+def test_attaching_a_source_preserves_approvals(tmp_path):
+    """Only source_files changes. Losing the intake artifact or a gate
+    approval would make this a destructive operation dressed as a small
+    one."""
+    source = tmp_path / "strings.json"
+    source.write_text('{"K":"开始"}', encoding="utf-8")
+    main(["job", "init", str(tmp_path / "jobs"), "later-ko",
+          "--game", "G", "--targets", "ko"])
+    job = Job(tmp_path / "jobs", "later-ko")
+    job.next_step(dry_run=True)          # market analysis makes G0 pending
+    job.approve("G0", by="tester")
+
+    main(["job", "set-source", str(tmp_path / "jobs"), "later-ko",
+          str(source)])
+    assert Job(tmp_path / "jobs", "later-ko").approved("G0")
+
+
+def test_an_existing_source_is_not_silently_replaced(tmp_path, capsys):
+    """Discarding a configured source would make a re-run ingest something
+    different from what the artifacts record."""
+    first = tmp_path / "a.json"
+    second = tmp_path / "b.json"
+    for path in (first, second):
+        path.write_text('{"K":"开始"}', encoding="utf-8")
+    main(["job", "init", str(tmp_path / "jobs"), "j", "--game", "G",
+          "--targets", "ko", "--source", str(first)])
+
+    assert main(["job", "set-source", str(tmp_path / "jobs"), "j",
+                 str(second)]) == 2
+    assert "--replace" in capsys.readouterr().err
+
+
+def test_replace_overrides_the_guard(tmp_path):
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    for path in (first, second):
+        path.write_text('{"K":"开始"}', encoding="utf-8")
+    main(["job", "init", str(tmp_path / "jobs"), "j", "--game", "G",
+          "--targets", "ko", "--source", str(first)])
+
+    assert main(["job", "set-source", str(tmp_path / "jobs"), "j",
+                 str(second), "--replace"]) == 0
+    control = json.loads((tmp_path / "jobs" / "j" / "job.json").read_text())
+    assert control["source_files"] == [str(second.resolve())]
+
+
+def test_a_missing_source_file_is_refused(tmp_path, capsys):
+    main(["job", "init", str(tmp_path / "jobs"), "j", "--game", "G",
+          "--targets", "ko"])
+    assert main(["job", "set-source", str(tmp_path / "jobs"), "j",
+                 "/nonexistent/strings.json"]) == 2
+    assert "not found" in capsys.readouterr().err
+
+
+def test_set_source_on_a_missing_job_is_refused(tmp_path, capsys):
+    source = tmp_path / "s.json"
+    source.write_text('{"K":"开始"}', encoding="utf-8")
+    assert main(["job", "set-source", str(tmp_path / "jobs"), "nope",
+                 str(source)]) == 2
+    assert "no job at" in capsys.readouterr().err
+
+
 # --------------------------------------------------------- discovery
 
 def test_job_list_answers_what_am_i_running(tmp_path, capsys):
@@ -174,7 +263,7 @@ def test_the_abort_is_traced(chat, monkeypatch):
     _always_calls(monkeypatch, "read_artifact", {"stage": 0, "name": "no"})
     chat.turn("read it")
     assert any(record.get("event") == "abort"
-               and record.get("reason") == "repeated_failure"
+               and record.get("reason") == "repeated_call"
                for record in chat.trace)
 
 

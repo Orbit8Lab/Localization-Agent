@@ -24,7 +24,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Type, TypeVar
+from typing import Dict, List, Optional, Type, TypeVar
 
 from pydantic import BaseModel
 
@@ -63,13 +63,69 @@ class JobStore:
                     if (m := re.fullmatch(r"attempt-(\d+)", p.name))]
         return max(attempts) if attempts else None
 
+    def find_attempt(self, stage: int, name: str) -> Optional[int]:
+        """The newest attempt actually holding `name`, or None.
+
+        `latest_attempt` answers a different question — "what ran most
+        recently" — and the two diverge as soon as a stage is run more
+        than once with different artifact names. Stage 5 does exactly
+        that: every `lqa run` opens its own attempt, so auditing four
+        locales leaves four attempts each holding ONE locale's report.
+        Reading the ja report out of the latest attempt then fails with a
+        missing-artifact path, even though the file is right there in an
+        earlier attempt.
+        """
+        base = self.job_dir / f"s{stage}"
+        if not base.exists():
+            return None
+        found = [int(m.group(1)) for p in base.iterdir()
+                 if (m := re.fullmatch(r"attempt-(\d+)", p.name))
+                 and (p / f"{name}.json").exists()]
+        return max(found) if found else None
+
+    def artifact_names(self, stage: int) -> Dict[str, List[int]]:
+        """Every artifact name in a stage → the attempts holding it.
+
+        Exists to make a miss self-explanatory: "missing artifact
+        <path>" tells the operator nothing about which names ARE
+        available, which is the only thing they need to recover.
+        """
+        base = self.job_dir / f"s{stage}"
+        names: Dict[str, List[int]] = {}
+        if not base.exists():
+            return names
+        for attempt_dir in sorted(base.iterdir()):
+            m = re.fullmatch(r"attempt-(\d+)", attempt_dir.name)
+            if not m:
+                continue
+            for artifact in sorted(attempt_dir.glob("*.json")):
+                names.setdefault(artifact.stem, []).append(int(m.group(1)))
+        return names
+
     def new_attempt(self, stage: int) -> int:
+        """Claim the next attempt number for a stage.
+
+        `exist_ok=True` made this read-then-create, so two processes
+        could compute the same `n` and both "succeed" — the second then
+        wrote its report into the first's directory. Auditing four
+        locales in parallel is the obvious way to use this tool, and it
+        would have silently lost a locale's findings.
+
+        Creating the directory EXCLUSIVELY makes the claim atomic: the
+        loser of a race gets FileExistsError and retries with the next
+        number, so concurrent callers get distinct attempts.
+        """
         if stage not in VERSIONED_STAGES:
             raise ArtifactError(f"stage {stage} is not attempt-versioned")
+        base = self.job_dir / f"s{stage}"
+        base.mkdir(parents=True, exist_ok=True)
         n = (self.latest_attempt(stage) or 0) + 1
-        (self.job_dir / f"s{stage}" / f"attempt-{n:02d}").mkdir(
-            parents=True, exist_ok=True)
-        return n
+        while True:
+            try:
+                (base / f"attempt-{n:02d}").mkdir()
+                return n
+            except FileExistsError:
+                n += 1
 
     # ------------------------------------------------------------- write
 
@@ -140,6 +196,19 @@ class JobStore:
 
     def run_db_path(self, locale: str) -> Path:
         path = self.job_dir / "runs" / f"{locale}.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def smoke_db_path(self, locale: str) -> Path:
+        """Scratch DB for a pre-flight smoke run.
+
+        Kept OUT of `runs/` on purpose: everything in `runs/` is the real
+        translation state, and a smoke run marking segments accepted there
+        would silently shrink the batch it was meant to de-risk. Under
+        `smoke/` it is obviously disposable, and `derive()` never looks at
+        it, so a smoke run can never advance the job.
+        """
+        path = self.job_dir / "smoke" / f"{locale}.db"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 

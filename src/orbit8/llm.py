@@ -147,24 +147,44 @@ class OpenAICompatProvider:
         not return. The caller sees APITimeoutError, so the existing
         retry policy handles it like any other timeout.
         """
-        import concurrent.futures as _cf
+        import threading
 
         deadline = self.timeout * DEADLINE_FACTOR
-        pool = _cf.ThreadPoolExecutor(max_workers=1,
-                                      thread_name_prefix="orbit8-llm")
-        future = pool.submit(call)
-        try:
-            return future.result(timeout=deadline)
-        except _cf.TimeoutError:
+        box: dict = {}
+
+        def run():
+            try:
+                box["value"] = call()
+            except BaseException as err:        # re-raised on the caller
+                box["error"] = err
+
+        # A RAW DAEMON THREAD, not a ThreadPoolExecutor.
+        #
+        # ThreadPoolExecutor registers an atexit hook that JOINS every
+        # worker it ever created, and `shutdown(wait=False)` does not
+        # exempt them. A call stuck in _ssl__SSLSocket_read therefore
+        # survives the deadline — the retry proceeds correctly — and then
+        # blocks interpreter EXIT indefinitely, with no timeout of its
+        # own. Observed on a real audit: the cascade finished, the report
+        # was never written, and the process sat for over three hours at
+        # ~0 CPU with two abandoned SSL reads pinned open.
+        #
+        # A daemon thread is abandoned for real: the interpreter does not
+        # wait for it, so a stalled request costs one leaked thread and a
+        # socket the OS reclaims at exit, instead of the whole run.
+        worker = threading.Thread(target=run, daemon=True,
+                                  name="orbit8-llm")
+        worker.start()
+        worker.join(timeout=deadline)
+        if worker.is_alive():
             from openai import APITimeoutError
-            future.cancel()
             raise APITimeoutError(
                 request=None) from TimeoutError(
                     f"{self.name}/{self.model}: no response within "
                     f"{deadline:.0f}s wall-clock deadline")
-        finally:
-            # never block shutdown on an abandoned request
-            pool.shutdown(wait=False, cancel_futures=True)
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
 
     def complete(self, system: str, user: str, *,
                  temperature: float = 0.3, max_tokens: int = 2000) -> str:
