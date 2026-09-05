@@ -165,3 +165,46 @@ def test_force_still_prints_the_warnings(job, capsys):
     _report(job, "lqa-ja-20260830", "zh-CN")
     _run(job, "--name", "lqa-ja-20260830", "--force")
     assert "locale='zh-CN'" in capsys.readouterr().err
+
+
+# -------------------------------------------- hyphenated locale names
+
+def test_a_hyphenated_locale_is_found_in_a_run_name():
+    """`locale_in_name` tokenized the name on non-alphanumerics, which
+    shreds a hyphenated locale: "lqa-zh-CN-20260830" became
+    {"lqa","zh","CN","20260830"} and "zh-CN" never matched. Worse than a
+    miss — a configured bare "zh" DID match, so the mismatch guard
+    compared the report against the WRONG locale instead of skipping."""
+    from orbit8.bug_report import locale_in_name
+    locales = ["zh-CN", "zh-Hant", "ja", "ko"]
+    assert locale_in_name("lqa-zh-CN-20260830", locales) == "zh-CN"
+    assert locale_in_name("lqa-zh-Hant-20260830-full",
+                          locales) == "zh-Hant"
+
+
+def test_a_bare_locale_does_not_win_over_its_hyphenated_sibling():
+    """Longest-first must still hold once matching is by search: "zh"
+    occurs INSIDE "zh-CN", so a naive scan would return it."""
+    from orbit8.bug_report import locale_in_name
+    locales = ["zh", "zh-CN", "zh-Hant"]
+    assert locale_in_name("lqa-zh-CN-20260830", locales) == "zh-CN"
+    assert locale_in_name("lqa-zh-Hant-x", locales) == "zh-Hant"
+    assert locale_in_name("lqa-zh-20260830", locales) == "zh"
+
+
+def test_a_un_m49_region_is_found():
+    from orbit8.bug_report import locale_in_name
+    assert locale_in_name("lqa-es-419-20260830", ["es-419", "es"]) == "es-419"
+
+
+def test_a_locale_inside_a_word_is_not_a_match():
+    """Bounded on both sides, so a name that merely CONTAINS the letters
+    does not trip the guard."""
+    from orbit8.bug_report import locale_in_name
+    assert locale_in_name("my-zhang-report", ["zh", "ja"]) is None
+    assert locale_in_name("jakarta-build", ["ja"]) is None
+
+
+def test_a_name_with_no_locale_is_still_none():
+    from orbit8.bug_report import locale_in_name
+    assert locale_in_name("dev-audit", ["zh-CN", "ja"]) is None

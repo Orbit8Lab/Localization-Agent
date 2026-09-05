@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
 
 from .controller import GATES, GATE_NAMES, Job, Stage
 from .llm import OpenAICompatProvider, PROVIDER_PRESETS
@@ -320,7 +318,7 @@ def _cmd_lqa_report(args) -> int:
     from .bug_report import (build_suggestions, load_locations,
                              locale_in_name, target_language_of,
                              write_bug_report_xlsx, write_tech_summary)
-    from .schemas import LQAReport, StyleBrief
+    from .schemas import LQAReport
     job = Job(Path(args.root), args.job_id)
     intake = job.store.read(0, "intake", IntakeBrief)
     # Find the attempt HOLDING this report, don't assume the newest one
@@ -1281,7 +1279,7 @@ def _cmd_new(args) -> int:
     written until a human says yes, and validation runs before they are
     asked, so an obviously wrong locale never reaches the prompt.
     """
-    from .intake_wizard import propose_intake, render, review, to_intake
+    from .intake_wizard import propose_intake, render, to_intake
 
     from .project_paths import discover_sources, scaffold_project
 

@@ -188,9 +188,16 @@ def locale_in_name(name: str, locales: List[str]) -> Optional[str]:
     from firing on unrelated names, and longest-first stops `zh-Hant`
     from being read as a bare match when both it and `zh` are configured.
     """
-    parts = set(re.split(r"[^A-Za-z0-9]+", name))
     for locale in sorted(locales, key=len, reverse=True):
-        if locale in parts:
+        # Bounded SEARCH, not tokenize-then-membership. Splitting the name
+        # on non-alphanumerics shreds a hyphenated locale: "lqa-zh-CN-2026"
+        # became {"lqa","zh","CN","2026"}, so "zh-CN" never matched — and
+        # worse, a configured bare "zh" DID, so the guard compared the
+        # report against the wrong locale instead of merely skipping. The
+        # lookarounds keep "zh" from matching inside "zh-CN", which is what
+        # the tokenizing was for.
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(locale)}(?![A-Za-z0-9])",
+                     name):
             return locale
     return None
 
