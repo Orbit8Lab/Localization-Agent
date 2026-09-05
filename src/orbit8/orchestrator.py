@@ -376,6 +376,21 @@ class ChatOrchestrator:
         self.trace_path = Path(trace_path) if trace_path else None
         self.turn_no = 0
 
+    def _locale_provider(self, args: dict):
+        """The provider a per-locale tool should run on.
+
+        Chat sessions are started with `--provider`, and a tool that
+        constructs its own client silently ignores it: `--provider gemini`
+        would still bill DeepSeek. The session's provider is the answer,
+        with the factory preferred when there is one so a per-locale
+        provider choice still reaches these tools.
+        """
+        if self.dry_run:
+            return None
+        if self.provider_factory:
+            return self.provider_factory(str(args.get("locale", "en")))
+        return self.provider
+
     # ------------------------------------------------------------- tools
 
     def _t_status(self, args: dict) -> str:
@@ -918,10 +933,12 @@ class ChatOrchestrator:
              "suggestions": result.suggestions[:8]}, ensure_ascii=False)
 
     def _t_translate_po(self, args: dict) -> str:
-        from .llm import OpenAICompatProvider, autoload_env
         from .po_translate import translate_untranslated
-        autoload_env()
-        provider = OpenAICompatProvider("deepseek")
+        provider = self._locale_provider(args)
+        if provider is None:
+            return json.dumps(
+                {"error": "translate_po needs a real model; this session "
+                          "is --dry-run"}, ensure_ascii=False)
         from .project_paths import resolve_glossary
         po_path = self._confine(str(args.get("po", "")))
         glossary, notes = resolve_glossary(
@@ -1319,11 +1336,10 @@ class ChatOrchestrator:
             if args.get("decisions") else [])
         for zh, en in dict(args.get("terms") or {}).items():
             decisions.append(TermDecision(zh=str(zh), en=str(en)))
-        provider = None
-        if args.get("llm_filter"):
-            from .llm import OpenAICompatProvider, autoload_env
-            autoload_env()
-            provider = OpenAICompatProvider("deepseek")
+        # The LLM filter is opt-in; without it extraction is fully
+        # deterministic and needs no provider at all.
+        provider = (self._locale_provider(args)
+                    if args.get("llm_filter") else None)
         result = extract_glossary(
             po_paths, decisions, provider=provider,
             min_freq=int(args.get("min_freq", 3)),
@@ -1468,6 +1484,42 @@ class ChatOrchestrator:
         throwaway instance-free introspection of the handler prefix."""
         return frozenset(
             name[3:] for name in dir(cls) if name.startswith("_t_"))
+
+    # ------------------------------------------------- the work provider
+
+    def work_model(self) -> str:
+        """What stage steps and tools currently run on, as `name/model`.
+
+        Reported rather than inferred: the factory is a callable, so this
+        is the only honest way to answer "what will the next batch use?"
+        """
+        if self.provider_factory is None:
+            return f"{self.provider.name}/{self.provider.model}"
+        sample = self.provider_factory("en")
+        return f"{sample.name}/{sample.model}"
+
+    def set_work_model(self, factory) -> str:
+        """Rebind what stage executors and tools run on. Operator-only.
+
+        Deliberately NOT a tool. The agent choosing its own model would
+        make `model_fingerprint` record a decision no human took, and cost
+        would lose its ceiling for the same reason `route` is code rather
+        than a prompt (design §7). The chat agent's OWN reasoning model is
+        also untouched here — a session that changed its mind halfway
+        would be answering from two different behaviours with nothing in
+        the transcript to say where the seam was.
+
+        Callers must pass a factory that has ALREADY constructed a
+        provider successfully, so a bad model id or a missing key fails at
+        the prompt rather than three hours into a batch.
+        """
+        before = self.work_model()
+        self.provider_factory = factory
+        after = self.work_model()
+        # The trace is what a post-mortem reads to explain why two
+        # artifacts from one session carry different fingerprints.
+        self._trace("work_model", before=before, after=after)
+        return after
 
     def _playbook(self) -> Optional[str]:
         """The stage playbook for the CURRENT derived stage (PLAN §8).
