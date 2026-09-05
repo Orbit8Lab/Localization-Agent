@@ -279,7 +279,7 @@ uv run orbit8 next jobs demo-ko --dry-run     # repeat; stops at each gate
 uv run orbit8 approve jobs demo-ko G0 --by operator
 uv run orbit8 status jobs demo-ko
 
-# Real runs: default provider deepseek/deepseek-v4-pro, key from
+# Real runs: default provider deepseek/deepseek-v4-flash, key from
 # $DEEPSEEK_API (auto-loaded from .ENV outside the repo, or $ORBIT8_ENV)
 uv run orbit8 next jobs demo-ko
 
@@ -359,10 +359,10 @@ ran. Pick one per command with `--provider`:
 
 | `--provider` | Key env var | Notes |
 |---|---|---|
-| `deepseek` (default) | `DEEPSEEK_API` | reasoning model; token headroom added |
+| `deepseek` (default) | `DEEPSEEK_API` | `deepseek-v4-flash`; reasoning headroom added |
 | `openai` | `OPENAI_API_KEY` | |
 | `qwen` | `DASHSCOPE_API_KEY` | DashScope compatible-mode |
-| `huggingface` | `HF_API` | router; pass `--model org/model` explicitly |
+| `huggingface` | `HF_API` | `Qwen/Qwen3.8-27B`; ids are exactly `org/model` |
 | `gemini` | `GEMINI_API` | OpenAI-compat endpoint |
 | `anthropic` | `ANTHROPIC_API_KEY` | needs `uv sync --extra anthropic` |
 
@@ -380,6 +380,23 @@ export ANTHROPIC_API_KEY=sk-ant-...
 uv run orbit8 smoke jobs demo-ko --provider anthropic --model claude-opus-5
 ```
 
+### Splitting the agent from the work it drives
+
+The chat agent's own reasoning and the language work it drives have
+different economics — routing tool calls is cheap and constant, running a
+translation batch is neither — so they are configured separately:
+
+```bash
+uv run orbit8 chat jobs demo-ko --by tian \
+    --provider deepseek \
+    --work-provider huggingface --work-model Qwen/Qwen3.8-27B
+```
+
+`--work-provider` defaults to `--provider`, so a single-provider session
+is unchanged. An explicit `--api-key` belongs to `--provider` only; a
+different work provider resolves its own key from the environment, since
+forwarding one vendor's credential to another would leak it.
+
 ### Switching mid-session
 
 A chat session binds its model at start, but the model that stage steps
@@ -387,10 +404,10 @@ and tools run on can be changed between turns:
 
 ```
 you> /model                              # what is running on what
-stage/tool model: deepseek/deepseek-v4-pro
-chat agent model: deepseek/deepseek-v4-pro  (fixed for this session)
+stage/tool model: huggingface/Qwen/Qwen3.8-27B
+chat agent model: deepseek/deepseek-v4-flash  (fixed for this session)
 you> /model anthropic claude-opus-5      # escalate the pipeline work
-stage/tool model: deepseek/deepseek-v4-pro → anthropic/claude-opus-5
+stage/tool model: huggingface/Qwen/Qwen3.8-27B → anthropic/claude-opus-5
 ```
 
 Three deliberate limits. The switch is **operator-only** — there is no

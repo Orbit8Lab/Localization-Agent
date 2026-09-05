@@ -1196,6 +1196,24 @@ def _cmd_analyze(args) -> int:
     return 0
 
 
+def resolve_work_provider(args) -> tuple:
+    """Which (provider, model, api_key) the stage steps and tools use.
+
+    Split out of `_cmd_chat` so the rule has ONE definition and the tests
+    exercise the real thing rather than a copy that can drift from it.
+
+    Two rules, both about not silently sending the wrong thing to the
+    wrong vendor: `--model` qualifies `--provider`, so it does not travel
+    to a different work provider; and an explicit `--api-key` is one
+    vendor's secret, so it is never forwarded to another.
+    """
+    work_provider = args.work_provider or args.provider
+    work_model = (args.work_model if args.work_provider
+                  else (args.work_model or args.model))
+    work_key = args.api_key if work_provider == args.provider else None
+    return work_provider, work_model, work_key
+
+
 CHAT_HELP = """\
 commands:
   /debug          toggle verbose mode (tool args + result preview live)
@@ -1514,8 +1532,13 @@ def _cmd_chat(args) -> int:
         return 2
     provider = build_provider(args.provider, model=args.model,
                                     api_key=args.api_key)
+    # The agent's own reasoning and the language work it drives are
+    # different jobs with different economics: routing tool calls is cheap
+    # and frequent, translating a batch is neither. `--work-provider`
+    # defaults to `--provider`, so the single-provider case is unchanged.
+    work_provider, work_model, work_key = resolve_work_provider(args)
     factory = lambda locale: build_provider(
-        args.provider, model=args.model, api_key=args.api_key)
+        work_provider, model=work_model, api_key=work_key)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     trace_path = (Path(args.trace) if args.trace
                   else job.store.job_dir / "chat-traces"
@@ -1594,15 +1617,18 @@ def _cmd_chat(args) -> int:
             chosen = parts[2] if len(parts) > 2 else None
             # Build ONE provider now, so a bad model id or a missing key
             # fails here rather than hours into the next batch.
+            # Same rule as at startup: an explicit --api-key belongs to
+            # --provider only, never to a vendor switched in later.
+            key = args.api_key if name == args.provider else None
             try:
-                build_provider(name, model=chosen, api_key=args.api_key)
+                build_provider(name, model=chosen, api_key=key)
             except Exception as err:
                 print(f"✗ {type(err).__name__}: {err}")
                 continue
             before = chat.work_model()
             after = chat.set_work_model(
-                lambda locale, _n=name, _m=chosen: build_provider(
-                    _n, model=_m, api_key=args.api_key))
+                lambda locale, _n=name, _m=chosen, _k=key: build_provider(
+                    _n, model=_m, api_key=_k))
             print(f"stage/tool model: {before} → {after}")
             continue
         if message.lower().startswith("/last"):
@@ -2423,8 +2449,16 @@ def main(argv=None) -> int:
     chat.add_argument("--by", required=True,
                       help="operator name recorded on gate approvals")
     chat.add_argument("--provider", default="deepseek",
-                      choices=PROVIDER_NAMES)
+                      choices=PROVIDER_NAMES,
+                      help="the chat agent's own reasoning model "
+                           "(fixed for the session)")
     chat.add_argument("--model")
+    chat.add_argument("--work-provider", choices=PROVIDER_NAMES,
+                      help="provider for stage steps and language work "
+                           "(default: --provider); switch mid-session "
+                           "with /model")
+    chat.add_argument("--work-model",
+                      help="model for stage steps and language work")
     chat.add_argument("--api-key")
     chat.add_argument("--dry-run", action="store_true",
                       help="stage steps run with echo stubs (chat itself "

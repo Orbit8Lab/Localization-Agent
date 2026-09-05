@@ -33,8 +33,12 @@ def test_only_deepseek_sends_reasoning_effort():
 
 
 def test_headroom_only_where_reasoning_tokens_are_billed():
-    assert PROVIDER_PRESETS["deepseek"].headroom == llm.REASONING_HEADROOM
-    for name in ("gemini", "openai", "qwen", "huggingface"):
+    """Headroom tracks the DEFAULT MODEL, not the vendor: a thinking model
+    spends tokens the caller never sees, so without headroom the visible
+    budget is silently eaten by reasoning and the answer truncates."""
+    for name in ("deepseek", "huggingface"):     # reasoning defaults
+        assert PROVIDER_PRESETS[name].headroom == llm.REASONING_HEADROOM
+    for name in ("gemini", "openai", "qwen"):    # non-reasoning defaults
         assert PROVIDER_PRESETS[name].headroom == 0
 
 
@@ -200,3 +204,19 @@ def test_satisfies_the_provider_protocol(monkeypatch):
     assert callable(provider.complete)
     assert llm.model_fingerprint(provider, "sys").startswith(
         f"anthropic/{provider.model}#")
+
+
+# ------------------------------------------------------ configured defaults
+
+def test_deepseek_defaults_to_flash():
+    """The operator's choice for the chat agent: flash routes tool calls,
+    which is constant cheap work rather than a translation batch."""
+    assert PROVIDER_PRESETS["deepseek"].default_model == "deepseek-v4-flash"
+
+
+def test_huggingface_default_is_a_router_qualified_id():
+    """Router ids are exactly `org/model`; a bare name 404s at request
+    time, which is the wrong place to find out."""
+    model = PROVIDER_PRESETS["huggingface"].default_model
+    assert model == "Qwen/Qwen3.8-27B"
+    assert model.count("/") == 1 and not model.startswith("/")

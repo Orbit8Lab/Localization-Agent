@@ -59,16 +59,21 @@ class Preset:
 PROVIDER_PRESETS: Dict[str, Preset] = {
     # DeepSeek's reasoning models bill hidden reasoning tokens against
     # max_tokens, hence the headroom.
-    "deepseek": Preset(DEEPSEEK_BASE_URL, "deepseek-v4-pro", "DEEPSEEK_API",
+    "deepseek": Preset(DEEPSEEK_BASE_URL, "deepseek-v4-flash", "DEEPSEEK_API",
                        extra_body=lambda: {"reasoning_effort": "low"},
                        headroom=REASONING_HEADROOM),
     "openai": Preset(None, "gpt-4o-mini", "OPENAI_API_KEY"),
     "qwen": Preset("https://dashscope.aliyuncs.com/compatible-mode/v1",
                    "qwen-plus", "DASHSCOPE_API_KEY"),
-    # Router model ids are strictly `org/model`; the default here is a
-    # starting point, not a recommendation — pass --model explicitly.
+    # Router model ids are strictly `org/model` and the router resolves
+    # each to whichever upstream currently serves it, so a working id can
+    # stop working without this table changing — `smoke` is the check.
+    # Qwen3.8 thinks before answering and bills the reasoning, so it needs
+    # the same headroom as any other reasoning model: without it the
+    # visible budget is spent on tokens the caller never sees.
     "huggingface": Preset("https://router.huggingface.co/v1",
-                          "Qwen/Qwen2.5-72B-Instruct", "HF_API"),
+                          "Qwen/Qwen3.8-27B", "HF_API",
+                          headroom=REASONING_HEADROOM),
     # NO extra_body: Gemini's OpenAI-compat surface rejects
     # `reasoning_effort`, so sending it 400s every call. Thinking is
     # configured on Gemini's native API, not through this shim.
