@@ -87,6 +87,10 @@ class LQAConfig:
     # Off by default so a caller who wants the ladder still gets it; the
     # CLI turns it on.
     full_scan: bool = False
+    # Group an entity's fields (an item's name + its blurb) into one
+    # Critic call, from the UE asset path. Costs nothing when paths are
+    # absent — every row simply becomes its own entity.
+    batch_by_entity: bool = True
     deterministic_only: bool = False      # T1+T2 only, zero LLM calls
     second_layer: bool = True
     requeue: bool = True                  # flagged strings back to G3 review
@@ -282,7 +286,11 @@ def build_lqa_graph(ctx: LQAContext):
             # One slot per distinct (source, target): several game keys
             # can share one, and 9% of slots were duplicates of a
             # judgment the Critic had already made in the same call.
-            collapse=True)
+            collapse=True,
+            # An item's name beside its own description. Derived from
+            # the UE asset path, which this client's GUID game keys do
+            # not carry — `context` holds the `#:` reference.
+            by_entity=cfg.batch_by_entity)
         found: Dict[str, List[Finding]] = {}
         audit: List[dict] = []
         errors: List[dict] = []

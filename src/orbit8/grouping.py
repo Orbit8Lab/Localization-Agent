@@ -207,11 +207,35 @@ def plan_story_batches(segments: Sequence[dict], *, max_size: int,
     return [b for b in batches if b]
 
 
+def _collapse_pairs(segments: Sequence[dict], key: str) -> List[dict]:
+    """One slot per distinct ``(text, target)``, absorbed ids recorded.
+
+    Rows whose TARGETS differ are never merged: one source with two
+    renderings is the inconsistency defect the batching exists to
+    expose.
+    """
+    merged: Dict[tuple, dict] = {}
+    order: List[tuple] = []
+    for seg in segments:
+        sig = (seg.get("text") or "", seg.get("target") or "")
+        if sig in merged:
+            merged[sig]["collapsed_uids"].append(str(seg.get(key)))
+            continue
+        row = dict(seg)
+        row["collapsed_uids"] = [str(seg.get(key))]
+        merged[sig] = row
+        order.append(sig)
+    return [merged[sig] for sig in order]
+
+
 def plan_similarity_batches(segments: Sequence[dict], *, max_size: int,
                             threshold: float = 0.8,
                             key: str = "uid",
                             by_domain: bool = False,
-                            collapse: bool = False) -> List[List[dict]]:
+                            collapse: bool = False,
+                            by_entity: bool = False,
+                            location_key: str = "context"
+                            ) -> List[List[dict]]:
     """Batch pure strings so members of a TEMPLATE FAMILY share a call.
 
     Inconsistency is only visible when the conflicting renderings sit in
@@ -244,10 +268,63 @@ def plan_similarity_batches(segments: Sequence[dict], *, max_size: int,
     Rows whose targets DIFFER are never merged — one source with two
     renderings is the inconsistency defect this batching exposes.
 
-    Both default OFF so the translate path is untouched; only the LQA
+    ``by_entity`` groups rows describing ONE game entity — an item's
+    `.ItemName` beside its `.ItemCommit` — derived from the UE asset
+    path in ``location_key`` (see asset_paths). Applied BEFORE template
+    clustering, because a name shares no surface form with its own
+    description and clustering can therefore never pair them. On the
+    real 1,349-row corpus this covers 191 rows across 92 entities.
+
+    All default OFF so the translate path is untouched; only the LQA
     Critic opts in.
     """
     from .templates import build_families
+
+    if by_entity:
+        # Entity FIRST, so an item's name and its blurb are adjacent
+        # before templates get a say: templates cluster on surface form,
+        # and a name shares no surface form with its own description, so
+        # clustering alone can never pair them.
+        #
+        # Collapse and domain-partition are applied HERE rather than
+        # left to the recursive path, because this branch returns
+        # early. A first cut returned before them and silently lost
+        # both: slots went back from 1,161 to 1,349 (every duplicate
+        # re-inflated) while the entity fix looked like it worked.
+        from .asset_paths import group_by_entity
+        if collapse:
+            segments = _collapse_pairs(segments, key)
+        if by_domain:
+            buckets: Dict[str, List[dict]] = {}
+            for seg in segments:
+                buckets.setdefault(str(seg.get("domain") or ""),
+                                   []).append(seg)
+            out: List[List[dict]] = []
+            for domain in sorted(buckets):
+                out.extend(plan_similarity_batches(
+                    buckets[domain], max_size=max_size,
+                    threshold=threshold, key=key, by_domain=False,
+                    collapse=False, by_entity=True,
+                    location_key=location_key))
+            return out
+        entities = group_by_entity(segments, key=key,
+                                   location_key=location_key)
+        packed: List[List[dict]] = []
+        current: List[dict] = []
+        for ent in entities:
+            # An entity is never split across calls: seeing half of one
+            # defeats the reason for grouping it.
+            if current and len(current) + len(ent) > max_size:
+                packed.append(current)
+                current = []
+            if len(ent) > max_size:
+                for i in range(0, len(ent), max_size):
+                    packed.append(ent[i:i + max_size])
+                continue
+            current.extend(ent)
+        if current:
+            packed.append(current)
+        return [b for b in packed if b]
 
     if by_domain:
         # Partition first, then plan within each domain, so a batch can
@@ -264,18 +341,7 @@ def plan_similarity_batches(segments: Sequence[dict], *, max_size: int,
         return out
 
     if collapse:
-        merged: Dict[tuple, dict] = {}
-        order: List[tuple] = []
-        for seg in segments:
-            sig = (seg.get("text") or "", seg.get("target") or "")
-            if sig in merged:
-                merged[sig]["collapsed_uids"].append(str(seg.get(key)))
-                continue
-            row = dict(seg)
-            row["collapsed_uids"] = [str(seg.get(key))]
-            merged[sig] = row
-            order.append(sig)
-        segments = [merged[sig] for sig in order]
+        segments = _collapse_pairs(segments, key)
 
     by_id = {str(s.get(key)): s for s in segments}
     clusters = [[m.id for m in family.members]
