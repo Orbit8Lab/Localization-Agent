@@ -61,14 +61,25 @@ def write_po(rows: List[dict], path: Path) -> None:
     path.write_text("\n".join(out), encoding="utf-8")
 
 
-def flagged_keys(report) -> Dict[str, List[str]]:
+def flagged_keys(report, *, min_severity: str = "low") -> Dict[str, List[str]]:
     """game key → bug types.
 
     Keyed on `game_keys`, not `uid`: the scanner dedups by (source,
     target) and a uid is the hash of that pair, so one flagged item can
     cover several game keys. Scoring on uid would silently under-count
     every duplicated string.
+
+    `min_severity` matters because severity is a real product decision,
+    not presentation. The width-ratio check is deliberately LOW and
+    labelled "unverified — confirm in-game", so a reviewer triages those
+    as a block. Scoring every advisory as a flag measures a report
+    nobody acts on that way; scoring only actionable findings measures
+    what the client actually reviews. Both are reported, since which one
+    is "the" precision depends on the consumer (see the L3-vs-L4
+    operating-point discussion).
     """
+    rank = {"low": 0, "medium": 1, "high": 2}
+    floor = rank[min_severity]
     out: Dict[str, List[str]] = {}
     for item in report.items:
         # bug_type lives on the wrapped Finding, not the verified
@@ -77,8 +88,16 @@ def flagged_keys(report) -> Dict[str, List[str]]:
                      if hasattr(getattr(f.finding, "bug_type", None), "value")
                      else getattr(f.finding, "bug_type", "?"))
                  for f in item.findings]
+        keep = [t for t, f in zip(types, item.findings)
+                if rank.get(str(getattr(f.finding, "severity", "low").value
+                                 if hasattr(getattr(f.finding, "severity",
+                                                    None), "value")
+                                 else getattr(f.finding, "severity", "low")),
+                            0) >= floor]
+        if not keep:
+            continue
         for key in (item.game_keys or [item.uid]):
-            out.setdefault(str(key), []).extend(types)
+            out.setdefault(str(key), []).extend(keep)
     return out
 
 
@@ -204,13 +223,22 @@ def main() -> int:
         elapsed = time.time() - t0
         flags = flagged_keys(res.report)
         sc = score(flags, rows)
+        # Actionable-only view: excludes LOW advisories, which the
+        # report presents as a separate triage block.
+        sc_act = score(flagged_keys(res.report, min_severity="medium"), rows)
         tokens = provider.tokens_spent if provider else 0.0
         print(f"  P={sc['precision']:.1%} R={sc['recall']:.1%} "
               f"F1={sc['f1']:.3f}  TP={sc['tp']} FP={sc['fp']} "
               f"FN={sc['fn']}  {elapsed:.0f}s tokens={tokens:.0f}")
+        print(f"  actionable-only (excl. LOW): P={sc_act['precision']:.1%} "
+              f"R={sc_act['recall']:.1%} F1={sc_act['f1']:.3f} "
+              f"TP={sc_act['tp']} FP={sc_act['fp']}")
         results.append({"condition": name, **cfg, "seconds": round(elapsed, 1),
                         "tokens": tokens, "flagged": len(flags),
-                        "batch_string": args.batch_string, **sc})
+                        "batch_string": args.batch_string, **sc,
+                        "actionable": {k: v for k, v in sc_act.items()
+                                       if k not in ("misses",
+                                                    "false_positives")}})
         out_path.write_text(json.dumps(
             {"provider": args.provider, "model": args.model,
              "n_rows": len(rows), "n_rejected": n_rej, "results": results},
