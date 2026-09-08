@@ -236,8 +236,21 @@ def build_lqa_graph(ctx: LQAContext):
 
 
     def tier3(state: LQAState) -> dict:
-        flagged = set(state.get("findings_t1", {})) | set(
-            state.get("findings_t2", {}))
+        t1_found = state.get("findings_t1", {})
+        t2_found = state.get("findings_t2", {})
+        flagged = set(t1_found) | set(t2_found)
+        # uid -> everything the deterministic tiers already established.
+        # Passed to the Critic so it does not spend the batch
+        # re-reporting a placeholder bug the gate proved, and instead
+        # looks for what it alone can see. Under full_scan a row reaches
+        # T3 even when T1 flagged it, so without this the Critic reviews
+        # a known-broken string with no idea it is known-broken — and a
+        # string carrying BOTH a mechanical and a semantic defect came
+        # back with only one of them.
+        prior: Dict[str, List[Finding]] = {}
+        for tier in (t1_found, t2_found):
+            for uid, fs in tier.items():
+                prior.setdefault(uid, []).extend(fs)
         survivors = (_accepted() if cfg.full_scan
                      else [r for r in _accepted() if r["uid"] not in flagged])
         ledger = dict(state.get("ledger", {}))
@@ -261,7 +274,15 @@ def build_lqa_graph(ctx: LQAContext):
             story, max_size=cfg.batch_size_story)
         batches += plan_similarity_batches(
             strings, max_size=cfg.batch_size,
-            threshold=cfg.similarity_threshold)
+            threshold=cfg.similarity_threshold,
+            # Homogeneous batches so `domain` below is never None: 9 of
+            # 9 batches used to mix ui/system/item_desc, which silently
+            # skipped the domain rubric for the whole corpus.
+            by_domain=True,
+            # One slot per distinct (source, target): several game keys
+            # can share one, and 9% of slots were duplicates of a
+            # judgment the Critic had already made in the same call.
+            collapse=True)
         found: Dict[str, List[Finding]] = {}
         audit: List[dict] = []
         errors: List[dict] = []
@@ -271,6 +292,10 @@ def build_lqa_graph(ctx: LQAContext):
             items = [(r["uid"], r["text"], r["target"] or "") for r in batch]
             brief = (ctx.glossary.brief_for([r["text"] for r in batch])
                      if ctx.glossary else None)
+            # Only the findings for THIS batch's rows: the whole-run set
+            # would be prompt weight the Critic cannot act on, and would
+            # grow with corpus size.
+            known = [f for r in batch for f in prior.get(r["uid"], [])]
             # batches are homogeneous by construction (story vs strings),
             # so one domain selects the rubric for the whole batch
             domains = {r.get("domain") for r in batch}
@@ -278,6 +303,7 @@ def build_lqa_graph(ctx: LQAContext):
                 review, _fp = agents.review_batch(
                     ctx.provider, items, source_lang=cfg.source_lang,
                     target_lang=cfg.locale, game=cfg.game,
+                    known_findings=known or None,
                     glossary_brief=brief, style_brief=ctx.style_brief,
                     client_lang=cfg.client_lang,
                     style_guide=ctx.style_guide,

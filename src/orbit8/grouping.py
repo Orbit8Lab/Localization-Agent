@@ -209,7 +209,9 @@ def plan_story_batches(segments: Sequence[dict], *, max_size: int,
 
 def plan_similarity_batches(segments: Sequence[dict], *, max_size: int,
                             threshold: float = 0.8,
-                            key: str = "uid") -> List[List[dict]]:
+                            key: str = "uid",
+                            by_domain: bool = False,
+                            collapse: bool = False) -> List[List[dict]]:
     """Batch pure strings so members of a TEMPLATE FAMILY share a call.
 
     Inconsistency is only visible when the conflicting renderings sit in
@@ -224,8 +226,56 @@ def plan_similarity_batches(segments: Sequence[dict], *, max_size: int,
     involved — and they stay distinct instances, which a threshold could
     never give at the same time. `threshold` now applies only to the
     second pass that merges near-identical TEMPLATES.
+
+    ``by_domain`` batches each domain separately. Without it, measured on
+    project002, **9 of 9 batches mixed ui/system/item_desc**, so the
+    caller could not name a domain and the domain-specific rubric was
+    skipped for every batch — the batch-split spec promises a
+    domain-aware prompt and nothing delivered one. Templates cluster on
+    surface form, which cuts across domains freely, so this has to be an
+    explicit partition rather than something clustering falls into.
+
+    ``collapse`` merges rows sharing an identical ``(text, target)`` into
+    one slot, recording absorbed ids on ``collapsed_uids``. Upstream
+    dedup is by (source, target) at the UID level, but several game keys
+    can map to one such pair and each still took a slot: batch 0 spent 7
+    of 19 slots on the same string, 9% of all slots redundant. The Critic
+    paid repeatedly for one judgment and saw less of the corpus per call.
+    Rows whose targets DIFFER are never merged — one source with two
+    renderings is the inconsistency defect this batching exposes.
+
+    Both default OFF so the translate path is untouched; only the LQA
+    Critic opts in.
     """
     from .templates import build_families
+
+    if by_domain:
+        # Partition first, then plan within each domain, so a batch can
+        # always name its domain. Sorted for reproducibility — batch
+        # layout rides on every model fingerprint.
+        buckets: Dict[str, List[dict]] = {}
+        for seg in segments:
+            buckets.setdefault(str(seg.get("domain") or ""), []).append(seg)
+        out: List[List[dict]] = []
+        for domain in sorted(buckets):
+            out.extend(plan_similarity_batches(
+                buckets[domain], max_size=max_size, threshold=threshold,
+                key=key, by_domain=False, collapse=collapse))
+        return out
+
+    if collapse:
+        merged: Dict[tuple, dict] = {}
+        order: List[tuple] = []
+        for seg in segments:
+            sig = (seg.get("text") or "", seg.get("target") or "")
+            if sig in merged:
+                merged[sig]["collapsed_uids"].append(str(seg.get(key)))
+                continue
+            row = dict(seg)
+            row["collapsed_uids"] = [str(seg.get(key))]
+            merged[sig] = row
+            order.append(sig)
+        segments = [merged[sig] for sig in order]
 
     by_id = {str(s.get(key)): s for s in segments}
     clusters = [[m.id for m in family.members]
