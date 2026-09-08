@@ -390,9 +390,25 @@ def build_lqa_graph(ctx: LQAContext):
                 "finding": finding.model_dump(mode="json"),
                 "verdict": verdict.model_dump(mode="json") if verdict else None})
 
+        # The verifier is the longest phase and emitted NO progress at
+        # all: on a 1,233-row run it went silent for 40+ minutes while
+        # making one LLM call per finding, which is indistinguishable
+        # from a hang. An operator watching the log had no way to tell a
+        # working verifier from a wedged one — the same "silence looks
+        # like success" shape as the glossary-coverage gap.
+        pending = sum(len(f) for f in state.get("findings_t3", {}).values())
+        if ctx.on_progress and pending:
+            ctx.on_progress("verify_start", {"findings": pending})
+        done = 0
         for uid, findings in state.get("findings_t3", {}).items():
             row = ctx.run_db.get(uid)
             for finding in findings:
+                done += 1
+                # Every 10th, so a long phase is visibly alive without
+                # the log becoming a per-finding firehose.
+                if ctx.on_progress and done % 10 == 0:
+                    ctx.on_progress("verify_progress",
+                                    {"done": done, "of": pending})
                 if finding.bug_type.value in suppressed_types:
                     record(uid, finding, None, False, "suppressed")
                     continue
