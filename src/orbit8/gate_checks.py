@@ -38,6 +38,13 @@ ALLOWED_SCRIPTS = {
 }
 
 # Targets whose locked terms legitimately inflect (case endings).
+# Valid `case` values for a glossary entry. Enumerated so a typo is a
+# loud error rather than a silent downgrade: an unrecognised value used
+# to fall through to `context`, which enforces nothing — reproducing the
+# exact failure shape that hid the BOSS bug, where a check that quietly
+# does not run looks identical to a check that passes.
+TERM_CASE_MODES = ("context", "exact", "sanctioned")
+
 INFLECTED_TARGETS = {"ru", "uk", "pl", "cs"}
 
 
@@ -55,10 +62,12 @@ class GateConfig:
     # what lets the gate accept "used to craft" without weakening into
     # fuzzy matching.
     term_forms: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    # source term -> "exact" | "context" (default). Capitalization is a
-    # STYLE question (rules CAP-*), not term identity: only a term
-    # explicitly marked `exact` — a proper name — may raise a casing
-    # finding here. Anything else is judged by the style rubric in T3.
+    # source term -> one of TERM_CASE_MODES ("context" default).
+    # Capitalization is usually a STYLE question (rules CAP-*) rather
+    # than term identity, so `context` does not enforce it and T3 judges
+    # it with surrounding context. `exact` is for proper names.
+    # `sanctioned` rejects only the all-caps screaming form — see
+    # `locked_in_target` for why that third mode had to exist.
     term_case: Dict[str, str] = field(default_factory=dict)
     dnt: List[str] = field(default_factory=list)
     length_ratio_bounds: tuple = (0.2, 5.0)
@@ -223,6 +232,40 @@ def applicable_terms(source: str,
     return applicable
 
 
+def _screams(locked: str, target: str) -> bool:
+    """Does `target` render `locked` in ALL-CAPS where it should not?
+
+    Only fires when the mandated form is NOT itself all-caps: a term
+    like "HP" is an initialism and its uppercase form is correct, so
+    flagging it would be nonsense. Single characters are excluded for
+    the same reason ("press A").
+
+    Compared per-word so a multi-word term is judged on the words that
+    carry the casing, not on its punctuation.
+    """
+    want_words = [w for w in re.findall(r"[0-9A-Za-z]+", locked) if w]
+    if not want_words:
+        return False
+    # A term whose own mandated form is all-caps has no screaming form.
+    if all(w.isupper() for w in want_words):
+        return False
+    # Inflected spans too: the screaming form of "Boss" appears as
+    # "BOSSES" as often as "BOSS", and judging only exact spans would
+    # let the plural through.
+    spans = term_spans(locked, target) or _inflected_spans(locked, target)
+    for start, end in spans:
+        got = target[start:end]
+        got_words = [w for w in re.findall(r"[0-9A-Za-z]+", got) if w]
+        # Ignore 1-char words: "A"/"I" are trivially uppercase.
+        judged = [w for w in got_words if len(w) > 1]
+        if not judged:
+            continue
+        if all(w.isupper() for w in judged) and any(
+                not w.isupper() for w in want_words if len(w) > 1):
+            return True
+    return False
+
+
 def locked_in_target(locked: str, target: str, target_lang: str,
                      morphology=None, variants: Iterable[str] = (),
                      forms: Optional[Dict[str, str]] = None,
@@ -243,21 +286,42 @@ def locked_in_target(locked: str, target: str, target_lang: str,
        live here: this function executes a profile, it does not know
        English or Russian.
 
-    ``case`` says whether capitalization is part of term IDENTITY. It is
-    "context" by default — a term names a WORD, and whether that word is
-    capitalized in a given sentence is a style rule (CAP-*), judged with
-    the surrounding context in T3. Only a term declared "exact" (a proper
-    name) is matched case-sensitively here.
+    ``case`` says whether capitalization is part of term IDENTITY:
+
+    - ``context`` (default) — any casing satisfies the term. A term names
+      a WORD; whether it is capitalized in a given sentence is a style
+      rule (CAP-*), judged with context in T3.
+    - ``exact`` — one casing only. For proper names.
+    - ``sanctioned`` — reject the SCREAMING form, accept any casing a
+      human would write. For the commonest real case, which neither
+      other mode fits: a word that is Title Case as a system name and
+      lowercase as a common noun, where the client has nonetheless
+      banned all-caps.
+
+      Measured on project002, whose glossary locks BOSS -> "Boss":
+      ``context`` let 8 casing defects the post-editor rejected go
+      unflagged, while ``exact`` caught them but also flagged "killed
+      the boss" and "a boss fight" — both ACCEPTED by that post-editor
+      as CAP-02/13 common-noun usage. ``sanctioned`` is the mode that
+      wants neither.
 
     Without a profile the legacy behaviour applies (stem tolerance for
     the inflected-target list), so callers that predate style guides keep
     working.
     """
+    if case not in TERM_CASE_MODES:
+        raise ValueError(
+            f"unknown glossary case mode {case!r} for term {locked!r} "
+            f"(expected one of {', '.join(TERM_CASE_MODES)}). Refusing to "
+            f"fall back to 'context', which would silently enforce "
+            f"nothing.")
     if case == "exact" and locked not in target:
         # A proper name whose casing is wrong: the WORD is present but
         # not in its mandated form, so this is a real finding.
         if term_in_text(locked, target):
             return False
+    if case == "sanctioned" and _screams(locked, target):
+        return False
     if term_in_text(locked, target):
         return True
     # A declared form is a base to inflect from, not a fixed string: a
