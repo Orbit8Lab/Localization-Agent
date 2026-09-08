@@ -521,6 +521,48 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
                      f"mapping in the export."),
             evidence=target[:80])]
 
+    # 2a. line structure (STY-08). The client rule requires `\r`/`\n`/`\`
+    #     counts and positions to match the source; it was classified
+    #     enforcement="llm" — a prompt suggestion — with no code
+    #     comparing them anywhere.
+    #
+    #     Scope is deliberately NARROW: a loss of BARE newlines, with UE
+    #     continuation markers (`\` + newline) excluded and additions
+    #     never flagged. Three formulations were measured against the
+    #     post-editor's own output, where any finding is false by
+    #     definition:
+    #
+    #       formulation                     FP on human   B1   B2
+    #       bare-\n loss (this one)                   3    4    5
+    #       any break-character loss                 16   15   37
+    #       rendered line-count drop                 16   15   38
+    #
+    #     The looser two detect far more, and are wrong far more: 16 of
+    #     their findings land on text a professional shipped. They fire
+    #     mostly where the source uses `\`+newline as a continuation
+    #     marker and the editor legitimately reflows the prose, or where
+    #     the editor ADDS breaks for readability — which no client rule
+    #     forbids.
+    #
+    #     Consequence to state plainly: this check does NOT catch most of
+    #     what batching does to line structure. Batched output tends to
+    #     emit `\` where the source had `\`+newline, and per-sentence
+    #     output emits `\n` — both differ from the editor, who preserves
+    #     `\`+newline verbatim. Distinguishing those from a legitimate
+    #     reflow needs the rendered widget, not the string, so it is left
+    #     to T3 rather than guessed at here. A narrow check that is right
+    #     beats a broad one that cries wolf on shipped text.
+    for brk, label in (("\n", "\\n"), ("\r", "\\r")):
+        hard_src = source.count(brk) - source.count("\\" + brk)
+        hard_tgt = target.count(brk) - target.count("\\" + brk)
+        if hard_src and hard_tgt < hard_src:
+            findings.append(Finding(
+                key=key, bug_type=BugType.MARKUP, severity=Severity.HIGH,
+                message=f"Line structure lost [STY-08]: source has "
+                        f"{hard_src} hard {label}, target has {hard_tgt}. "
+                        f"Recipe and multi-line UI text depends on these.",
+                evidence=target[:80]))
+
     # 2. placeholder / markup integrity (multiset equality)
     src_ph, tgt_ph = _extract_placeholders(source), _extract_placeholders(target)
     if src_ph != tgt_ph:
