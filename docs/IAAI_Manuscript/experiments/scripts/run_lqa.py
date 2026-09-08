@@ -33,6 +33,9 @@ from orbit8.llm import build_provider
 from orbit8.po_scan import scan_po
 from orbit8.style_guide import StyleGuide
 
+_DATASETS = {"mtpe": "p002_mtpe_groundtruth.jsonl",
+             "round1": "p002_round1_groundtruth.jsonl"}
+
 HERE = Path(__file__).resolve().parents[1]
 DATA, RESULTS = HERE / "data", HERE / "results"
 DRIVE = Path("/Users/maotian/Library/CloudStorage/"
@@ -54,7 +57,12 @@ def write_po(rows: List[dict], path: Path) -> None:
     out = ['msgid ""', 'msgstr ""',
            '"Content-Type: text/plain; charset=UTF-8\\n"', ""]
     for r in rows:
-        out += [f'#: {r["string_type"]}',
+        # The `#:` reference must be the real UE asset path when we have
+        # it: entity/role/subsystem grouping all read it, and the
+        # display-width budget derives the widget class from it. Falling
+        # back to string_type keeps older datasets working.
+        ref = r.get("location") or r.get("string_type") or ""
+        out += [f'#: {ref}',
                 f'msgctxt "{_esc(r["key"])}"',
                 f'msgid "{_esc(r["source"])}"',
                 f'msgstr "{_esc(r["mt"])}"', ""]
@@ -124,11 +132,37 @@ CONDITIONS = {
 }
 
 
-def score(flags: Dict[str, List[str]], rows: List[dict]) -> dict:
+def score(flags: Dict[str, List[str]], rows: List[dict], *,
+          labelled_only: bool = False) -> dict:
+    """Precision/recall against the human verdict.
+
+    ``labelled_only`` restricts the POSITIVE class to rejections the
+    editor gave an explicit bug category. This matters enormously on
+    the round-1 corpus: of 397 rejections, **279 (70%) carry no bug
+    label** — they are fluency and register rewrites ("This studio is a
+    game company founded in 2022" → "Founded in 2022, our studio is an
+    independent game development team"). Real editorial work, but not
+    a defect any checker claims to detect.
+
+    Scored against all 397, a PERFECT detector of labelled bugs caps at
+    29.7% recall, so the headline recall number measures how much
+    fluency-rewriting the scanner accidentally predicts rather than how
+    well it detects defects. Both views are reported; the labelled view
+    is the one a detector should be judged on, and the full view stays
+    because a client does care that 279 strings needed work.
+
+    Accepted rows remain the negative class in BOTH views — a finding
+    on a string the editor shipped is a false positive either way.
+    """
     tp = fp = fn = tn = 0
     misses, false_pos = [], []
     for r in rows:
         hit = r["key"] in flags
+        if labelled_only and r["human_rejected"] and not r.get("bug_categories"):
+            # An unlabelled rejection is neither a defect to find nor a
+            # string to stay quiet about: excluded from both classes
+            # rather than silently counted as a miss.
+            continue
         if r["human_rejected"]:
             if hit:
                 tp += 1
@@ -171,11 +205,19 @@ def main() -> int:
     ap.add_argument("--batch-string", type=int, default=20)
     ap.add_argument("--conditions", default=",".join(CONDITIONS))
     ap.add_argument("--limit", type=int)
+    # Which labelled corpus. The two are INDEPENDENT evaluations, not
+    # one larger one: only 23 ids overlap and the MT differs between
+    # rounds, so their verdicts are about different text and must never
+    # be pooled.
+    ap.add_argument("--dataset", default="mtpe",
+                    choices=("mtpe", "round1"),
+                    help="mtpe = 174 rows/57 rejections (2026-08-03); "
+                         "round1 = 1,233 rows/397 rejections (2026-07-19)")
     ap.add_argument("--tag", default="main")
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in
-            (DATA / "p002_mtpe_groundtruth.jsonl").read_text(
+            (DATA / _DATASETS[args.dataset]).read_text(
                 encoding="utf-8").splitlines() if l.strip()]
     if args.limit:
         rows = rows[:args.limit]
@@ -226,6 +268,10 @@ def main() -> int:
         # Actionable-only view: excludes LOW advisories, which the
         # report presents as a separate triage block.
         sc_act = score(flagged_keys(res.report, min_severity="medium"), rows)
+        # Labelled-bug view: only rejections the editor categorised.
+        has_labels = any(r.get("bug_categories") for r in rows)
+        sc_lab = (score(flags, rows, labelled_only=True)
+                  if has_labels else None)
         tokens = provider.tokens_spent if provider else 0.0
         print(f"  P={sc['precision']:.1%} R={sc['recall']:.1%} "
               f"F1={sc['f1']:.3f}  TP={sc['tp']} FP={sc['fp']} "
@@ -233,12 +279,20 @@ def main() -> int:
         print(f"  actionable-only (excl. LOW): P={sc_act['precision']:.1%} "
               f"R={sc_act['recall']:.1%} F1={sc_act['f1']:.3f} "
               f"TP={sc_act['tp']} FP={sc_act['fp']}")
+        if sc_lab:
+            print(f"  labelled-bugs only:          P={sc_lab['precision']:.1%} "
+                  f"R={sc_lab['recall']:.1%} F1={sc_lab['f1']:.3f} "
+                  f"TP={sc_lab['tp']} FP={sc_lab['fp']} FN={sc_lab['fn']}")
         results.append({"condition": name, **cfg, "seconds": round(elapsed, 1),
                         "tokens": tokens, "flagged": len(flags),
                         "batch_string": args.batch_string, **sc,
                         "actionable": {k: v for k, v in sc_act.items()
                                        if k not in ("misses",
-                                                    "false_positives")}})
+                                                    "false_positives")},
+                        "labelled_only": ({k: v for k, v in sc_lab.items()
+                                           if k not in ("misses",
+                                                        "false_positives")}
+                                          if sc_lab else None)})
         out_path.write_text(json.dumps(
             {"provider": args.provider, "model": args.model,
              "n_rows": len(rows), "n_rejected": n_rej, "results": results},

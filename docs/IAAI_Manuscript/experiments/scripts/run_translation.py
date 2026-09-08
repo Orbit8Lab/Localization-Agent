@@ -65,8 +65,12 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def load_rows() -> List[dict]:
-    path = DATA / "p002_mtpe_groundtruth.jsonl"
+_DATASETS = {"mtpe": "p002_mtpe_groundtruth.jsonl",
+             "round1": "p002_round1_groundtruth.jsonl"}
+
+
+def load_rows(dataset: str = "mtpe") -> List[dict]:
+    path = DATA / _DATASETS[dataset]
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
             if l.strip()]
 
@@ -176,7 +180,7 @@ def run_condition(name: str, rows: List[dict], *, provider, size: int,
         term_err += len(terr)
         chrf_sum += metrics.chrf(out, ref) if ref else 0.0
         pairs.append((r["source"], out))
-        per_row.append({"key": r["key"], "domain": r["domain"],
+        per_row.append({"key": r["key"], "domain": r.get("domain", ""),
                         "human_rejected": r["human_rejected"],
                         "output": out, "reference": ref, "exact": ok,
                         "violations": vio,
@@ -221,9 +225,11 @@ def main() -> int:
     ap.add_argument("--conditions", default=",".join(CONDITIONS))
     ap.add_argument("--limit", type=int, help="first N rows (smoke test)")
     ap.add_argument("--tag", default="main")
+    ap.add_argument("--dataset", default="mtpe",
+                    choices=("mtpe", "round1"))
     args = ap.parse_args()
 
-    rows = load_rows()
+    rows = load_rows(args.dataset)
     if args.limit:
         rows = rows[:args.limit]
     print(f"{len(rows)} strings; provider={args.provider} "
