@@ -31,6 +31,8 @@ def main() -> int:
                      "glossary_terms.json").read_text(encoding="utf-8"))
     locked = {zh: e["translation"] for zh, e in t1["terms"].items()
               if e.get("locked")}
+    forms = {zh: e["forms"] for zh, e in t1["terms"].items()
+             if e.get("forms")}
 
     out = []
     for field, name in (("mt", "A_production_mt"),
@@ -44,10 +46,10 @@ def main() -> int:
             vio = metrics.rule_violations(r["source"], t)
             v.update(vio)
             nb += bool(vio)
-            te += len(metrics.term_errors(r["source"], t, locked))
+            te += len(metrics.term_errors(r["source"], t, locked, forms))
             ch += metrics.chrf(t, r["reference"] or "")
             pairs.append((r["source"], t))
-        conflicts = metrics.consistency_conflicts(pairs, locked)
+        conflicts = metrics.consistency_conflicts(pairs, locked, forms)
         out.append({
             "condition": name,
             # These are artifacts, not runs: no calls, no tokens, no time.

@@ -98,7 +98,8 @@ def run_condition(name: str, rows: List[dict], *, provider, size: int,
                   use_glossary: bool, use_style: bool, agentic: bool,
                   glossary: Optional[Glossary],
                   guide: Optional[StyleGuide],
-                  locked: Dict[str, str]) -> dict:
+                  locked: Dict[str, str],
+                  forms: Dict[str, Dict[str, str]]) -> dict:
     batches = make_batches(rows, size=size, agentic=agentic)
     got: Dict[str, str] = {}
     calls = 0
@@ -171,7 +172,7 @@ def run_condition(name: str, rows: List[dict], *, provider, size: int,
         viol_strings += bool(vio)
         for v in vio:
             viol_by_rule[v] = viol_by_rule.get(v, 0) + 1
-        terr = metrics.term_errors(r["source"], out, locked)
+        terr = metrics.term_errors(r["source"], out, locked, forms)
         term_err += len(terr)
         chrf_sum += metrics.chrf(out, ref) if ref else 0.0
         pairs.append((r["source"], out))
@@ -181,7 +182,7 @@ def run_condition(name: str, rows: List[dict], *, provider, size: int,
                         "violations": vio,
                         "term_errors": [t[0] for t in terr]})
 
-    conflicts = metrics.consistency_conflicts(pairs, locked)
+    conflicts = metrics.consistency_conflicts(pairs, locked, forms)
     scored = len(rows) - missing
     return {
         "condition": name, "batch_size": size, "agentic": agentic,
@@ -234,9 +235,15 @@ def main() -> int:
     # locked terms are scored as errors.
     locked = {zh: e["translation"] for zh, e in t1.get("terms", {}).items()
               if e.get("locked")}
+    # Declared part-of-speech renderings. Any of them satisfies the term:
+    # 合成 is locked as "Crafting" but declares verb "craft", so
+    # "Craft using materials" follows the ruling and must not be scored
+    # as a defect.
+    forms = {zh: e["forms"] for zh, e in t1.get("terms", {}).items()
+             if e.get("forms")}
     guide = StyleGuide.load(DATA / "style_guide_zh_en.json")
-    print(f"glossary: {len(glossary.terms)} terms ({len(locked)} locked) · "
-          f"style: {len(guide.rules)} rules")
+    print(f"glossary: {len(glossary.terms)} terms ({len(locked)} locked, "
+          f"{len(forms)} with forms) · style: {len(guide.rules)} rules")
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS / f"translation_{args.tag}.json"
@@ -250,6 +257,7 @@ def main() -> int:
         provider = build_provider(args.provider, model=args.model)
         res = run_condition(name, rows, provider=provider,
                             glossary=glossary, guide=guide, locked=locked,
+                            forms=forms,
                             **CONDITIONS[name])
         print(f"  rule-violating strings={res['violation_strings']}"
               f"/{res['scored']} ({res['violation_rate']:.1%}) "

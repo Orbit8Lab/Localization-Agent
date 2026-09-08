@@ -88,42 +88,72 @@ def rule_violations(source: str, target: str) -> List[str]:
 
 
 def term_errors(source: str, target: str,
-                locked: Dict[str, str]) -> List[Tuple[str, str]]:
+                locked: Dict[str, str],
+                forms: Optional[Dict[str, Dict[str, str]]] = None
+                ) -> List[Tuple[str, str]]:
     """Locked source terms present but rendered as something else.
 
     Matching is longest-source-first so 感染值 is judged before 感染,
     which otherwise steals the match and reports a false error.
+
+    `forms` carries the glossary's declared part-of-speech renderings and
+    ANY of them satisfies the term. Without it this check reports false
+    errors on correct output: 合成 is locked as the noun "Crafting" but
+    declares {verb: "craft", noun: "crafting"}, so 通过材料合成 →
+    "Craft using materials" is right by the glossary's own ruling while a
+    naive exact-string test calls it a defect. 24 of the 419 terms carry
+    such a map, and they are the polysemous ones most likely to be
+    mis-scored — exactly the population a terminology metric must handle.
     """
     out = []
     tl = target.lower()
+    forms = forms or {}
     for zh in sorted(locked, key=len, reverse=True):
-        if zh and zh in source:
-            want = locked[zh]
-            if want and want.lower() not in tl:
-                out.append((zh, want))
+        if not zh or zh not in source:
+            continue
+        want = locked[zh]
+        if not want:
+            continue
+        accepted = {want.lower()}
+        accepted.update(v.lower() for v in (forms.get(zh) or {}).values() if v)
+        if not any(a in tl for a in accepted):
+            out.append((zh, want))
     return out
 
 
 def consistency_conflicts(pairs: List[Tuple[str, str]],
-                          locked: Dict[str, str]) -> Dict[str, set]:
+                          locked: Dict[str, str],
+                          forms: Optional[Dict[str, Dict[str, str]]] = None
+                          ) -> Dict[str, set]:
     """Source terms rendered inconsistently across the whole corpus.
 
     The batching claim lives here: a per-sentence system has no way to
     know how it rendered the same term 300 lines earlier, so this is the
     error class context is supposed to remove.
+
+    Declared part-of-speech forms are NOT conflicts. "craft" and
+    "crafting" for 合成 are both sanctioned by the glossary, so counting
+    them as an inconsistency penalises output that follows the ruling
+    exactly — the same bug as in `term_errors`, and it inflated every
+    condition's inconsistency count equally.
     """
+    forms = forms or {}
     seen: Dict[str, set] = collections.defaultdict(set)
     for source, target in pairs:
+        tl = (target or "").lower()
         for zh in locked:
-            if zh and zh in source:
-                # Record the rendering actually used, when recognisable.
-                want = locked[zh]
-                if want and want.lower() in (target or "").lower():
-                    seen[zh].add(want.lower())
-                else:
-                    # An unrecognised rendering still counts as a variant:
-                    # that is precisely the inconsistency being measured.
-                    seen[zh].add("<other>")
+            if not zh or zh not in source:
+                continue
+            want = locked[zh]
+            accepted = {want.lower()} if want else set()
+            accepted.update(v.lower() for v in (forms.get(zh) or {}).values()
+                            if v)
+            hit = next((a for a in sorted(accepted, key=len, reverse=True)
+                        if a in tl), None)
+            # All sanctioned forms collapse to one canonical bucket: the
+            # question is whether the project's DECISION was followed,
+            # not which inflection the sentence needed.
+            seen[zh].add("<sanctioned>" if hit else "<other>")
     return {zh: v for zh, v in seen.items() if len(v) > 1}
 
 

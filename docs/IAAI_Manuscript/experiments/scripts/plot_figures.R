@@ -20,7 +20,7 @@ resolution <- 300;
 lqa.file <- file.path(fig.dir, 'fig_lqa_accuracy.csv');
 if (file.exists(lqa.file)) {
     lqa.data <- read.csv(lqa.file, stringsAsFactors = FALSE);
-    lqa.data$label <- sub('^L[0-9]_', '', lqa.data$condition);
+    lqa.data$label <- sub('^L[0-9]+[a-z]?_', '', lqa.data$condition);
 
     plot.data <- data.frame(
         condition = rep(lqa.data$label, 2),
@@ -35,11 +35,13 @@ if (file.exists(lqa.file)) {
         groups = plot.data$metric,
         filename = file.path(fig.dir, 'fig4a_lqa_accuracy.png'),
         main = 'LQA detection accuracy vs. human post-editor',
-        main.cex = 1.3,
+        main.cex = 1.1,
         xlab.label = 'Workflow condition',
         ylab.label = 'Rate',
-        xaxis.cex = 1.0,
-        yaxis.cex = 1.0,
+        xaxis.cex = 0.9,
+        yaxis.cex = 0.9,
+        xlab.cex = 1.1,
+        ylab.cex = 1.1,
         xaxis.rot = 30,
         ylimits = c(0, 1),
         yat = seq(0, 1, 0.2),
@@ -69,8 +71,17 @@ if (file.exists(lqa.file)) {
 fp.file <- file.path(fig.dir, 'fig_fp_composition.csv');
 if (file.exists(fp.file)) {
     fp.data <- read.csv(fp.file, stringsAsFactors = FALSE);
-    fp.data$label <- sub('^L[0-9]_', '', fp.data$condition);
+    fp.data$label <- sub('^L[0-9]+[a-z]?_', '', fp.data$condition);
     fp.data$label <- factor(fp.data$label, levels = unique(fp.data$label));
+
+    # Stack order must be an explicit factor and the legend built from
+    # THOSE levels. Letting create.barplot infer groups from a character
+    # vector while labelling the key with sort(unique(...)) produced a
+    # legend whose colours did not match the stack -- the figure looked
+    # finished and was wrong.
+    bug.levels <- sort(unique(fp.data$bug_type));
+    fp.data$bug_type <- factor(fp.data$bug_type, levels = bug.levels);
+    bug.colours <- default.colours(length(bug.levels));
 
     create.barplot(
         formula = n ~ label,
@@ -79,23 +90,28 @@ if (file.exists(fp.file)) {
         stack = TRUE,
         filename = file.path(fig.dir, 'fig4b_fp_composition.png'),
         main = 'False positives by check type',
-        main.cex = 1.3,
+        main.cex = 1.1,
         xlab.label = 'Workflow condition',
         ylab.label = 'False positives',
-        xaxis.cex = 1.0,
-        yaxis.cex = 1.0,
+        xaxis.cex = 0.9,
+        yaxis.cex = 0.9,
+        xlab.cex = 1.1,
+        ylab.cex = 1.1,
         xaxis.rot = 30,
-        col = default.colours(length(unique(fp.data$bug_type))),
+        col = bug.colours,
+        # Headroom so the key never sits on top of a bar.
+        ylimits = c(0, max(tapply(fp.data$n, fp.data$label, sum)) * 1.45),
         legend = list(
             inside = list(
                 fun = draw.key,
                 args = list(key = list(
                     points = list(col = 'black', pch = 22, cex = 1.5,
-                                  fill = default.colours(length(unique(fp.data$bug_type)))),
-                    text = list(lab = sort(unique(fp.data$bug_type))),
-                    padding.text = 2
+                                  fill = bug.colours),
+                    text = list(lab = bug.levels),
+                    padding.text = 2,
+                    columns = 2
                     )),
-                x = 0.6, y = 0.95
+                x = 0.02, y = 0.97
                 )
             ),
         resolution = resolution,
@@ -110,7 +126,7 @@ if (file.exists(fp.file)) {
 tr.file <- file.path(fig.dir, 'fig_translation_quality.csv');
 if (file.exists(tr.file)) {
     tr.data <- read.csv(tr.file, stringsAsFactors = FALSE);
-    tr.data$label <- sub('^B[0-9]_', '', tr.data$condition);
+    tr.data$label <- sub('^B[0-9]+[a-z]?_', '', tr.data$condition);
     tr.data$label <- factor(tr.data$label, levels = tr.data$label);
 
     create.barplot(
@@ -118,11 +134,13 @@ if (file.exists(tr.file)) {
         data = tr.data,
         filename = file.path(fig.dir, 'fig5_translation_defects.png'),
         main = 'Style-rule violation rate by workflow condition',
-        main.cex = 1.3,
+        main.cex = 1.1,
         xlab.label = 'Workflow condition',
         ylab.label = 'Fraction of strings violating a client rule',
-        xaxis.cex = 1.0,
-        yaxis.cex = 1.0,
+        xaxis.cex = 0.9,
+        yaxis.cex = 0.9,
+        xlab.cex = 1.1,
+        ylab.cex = 1.1,
         xaxis.rot = 30,
         col = default.colours(1),
         resolution = resolution,
@@ -130,22 +148,39 @@ if (file.exists(tr.file)) {
         height = 5
         );
 
-    # Cost vs quality: the §6 operational argument. Batching cuts calls by
-    # an order of magnitude, so the interesting question is what that buys
-    # or costs in defects, which a scatter makes legible at a glance.
+    # Cost vs quality: the §6 operational argument. Plotted against
+    # TOKENS rather than calls -- several conditions share a call count
+    # (B2/B3/B4 are all ~9-10 batches), which collapses the x-axis, and
+    # a log scale over 2-3 tied points produced an invalid viewport.
+    # Tokens are also the quantity that maps to spend.
+    #
+    # Terminology error count is the y-axis here, not the style-rule
+    # rate: it is where the glossary effect lives (54 -> 0), and it is
+    # the axis on which the conditions actually separate.
+    tr.data$tokens.k <- tr.data$tokens / 1000;
     create.scatterplot(
-        formula = violation_rate ~ calls,
+        formula = term_errors ~ tokens.k,
         data = tr.data,
         filename = file.path(fig.dir, 'fig6_cost_quality.png'),
-        main = 'Cost vs. quality across conditions',
-        main.cex = 1.3,
-        xlab.label = 'LLM calls (log scale)',
-        ylab.label = 'Style-rule violation rate',
-        xaxis.cex = 1.0,
-        yaxis.cex = 1.0,
-        xaxis.log = TRUE,
-        cex = 1.6,
+        main = 'Cost vs. terminology accuracy',
+        main.cex = 1.1,
+        xlab.label = 'Tokens spent (thousands)',
+        ylab.label = 'Locked-term errors',
+        xaxis.cex = 0.9,
+        yaxis.cex = 0.9,
+        xlab.cex = 1.1,
+        ylab.cex = 1.1,
+        cex = 1.8,
+        pch = 19,
         col = default.colours(nrow(tr.data)),
+        # Label each point: with 3-4 conditions a legend costs more
+        # space than it saves.
+        add.text = TRUE,
+        text.labels = sub('^B[0-9]+[a-z]?_', '', tr.data$condition),
+        text.x = tr.data$tokens.k,
+        text.y = tr.data$term_errors + max(tr.data$term_errors) * 0.07,
+        text.cex = 0.85,
+        ylimits = c(-3, max(tr.data$term_errors) * 1.2 + 3),
         resolution = resolution,
         width = 6,
         height = 5
