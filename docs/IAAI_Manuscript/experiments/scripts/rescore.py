@@ -32,8 +32,10 @@ def main() -> int:
     if not path.exists():
         print(f"no results at {path}", file=sys.stderr)
         return 1
+    dataset = ("p002_round1_groundtruth.jsonl" if "r1" in tag
+               else "p002_mtpe_groundtruth.jsonl")
     rows = [json.loads(l) for l in
-            (HERE / "data/p002_mtpe_groundtruth.jsonl").read_text(
+            (HERE / "data" / dataset).read_text(
                 encoding="utf-8").splitlines() if l.strip()]
     t1 = json.loads((DRIVE / "project002-绯月杀/40-reference/glossary/"
                      "glossary_terms.json").read_text(encoding="utf-8"))
@@ -41,6 +43,15 @@ def main() -> int:
               if e.get("locked")}
     forms = {zh: e["forms"] for zh, e in t1["terms"].items()
              if e.get("forms")}
+    # F17: 22 of 41 locked terms post-date the 2026-07-19 PE pass, and
+    # scoring round-1 against them measures glossary evolution rather
+    # than translation quality.
+    excl_path = HERE / "data" / "round1_anachronistic_terms.json"
+    if "r1" in tag and excl_path.exists():
+        excluded = set(json.loads(excl_path.read_text(encoding="utf-8")))
+        locked = {zh: v for zh, v in locked.items() if zh not in excluded}
+        print(f"July-era glossary: {len(locked)} locked "
+              f"({len(excluded)} post-dated excluded)")
 
     doc = json.loads(path.read_text(encoding="utf-8"))
     for res in doc["results"]:

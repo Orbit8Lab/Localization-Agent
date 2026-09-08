@@ -70,9 +70,27 @@ _DATASETS = {"mtpe": "p002_mtpe_groundtruth.jsonl",
 
 
 def load_rows(dataset: str = "mtpe") -> List[dict]:
+    """Rows with a `domain`, derived from the UE asset path when the
+    dataset does not carry one.
+
+    The round-1 export has no StringType column, but it does have the
+    PO `#:` location — and that is a BETTER domain signal anyway, since
+    `classify_deterministic` is exactly what the production pipeline
+    uses. Defaulting the domain to "" instead would have silently
+    disabled domain-aware batching and the domain rubric for the whole
+    run, which is the class of bug this experiment already caught once.
+    """
+    from orbit8.classify import classify_deterministic
+
     path = DATA / _DATASETS[dataset]
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
-            if l.strip()]
+    rows = [json.loads(l) for l in
+            path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    for row in rows:
+        if not row.get("domain"):
+            label = classify_deterministic(row.get("key", ""),
+                                           row.get("location", "") or "")
+            row["domain"] = label.domain.value
+    return rows
 
 
 def make_batches(rows: List[dict], *, size: int, agentic: bool) -> List[List[dict]]:

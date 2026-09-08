@@ -23,9 +23,14 @@ DRIVE = Path("/Users/maotian/Library/CloudStorage/"
              "project")
 
 
+_DATASETS = {"mtpe": "p002_mtpe_groundtruth.jsonl",
+             "round1": "p002_round1_groundtruth.jsonl"}
+
+
 def main() -> int:
+    tag = sys.argv[1] if len(sys.argv) > 1 else "mtpe"
     rows = [json.loads(l) for l in
-            (HERE / "data/p002_mtpe_groundtruth.jsonl").read_text(
+            (HERE / "data" / _DATASETS[tag]).read_text(
                 encoding="utf-8").splitlines() if l.strip()]
     t1 = json.loads((DRIVE / "project002-绯月杀/40-reference/glossary/"
                      "glossary_terms.json").read_text(encoding="utf-8"))
@@ -33,6 +38,17 @@ def main() -> int:
               if e.get("locked")}
     forms = {zh: e["forms"] for zh, e in t1["terms"].items()
              if e.get("forms")}
+    # 22 of 41 locked terms were ratified AFTER the 2026-07-19 PE pass
+    # (F17). Scoring round-1 output against them measures the glossary's
+    # evolution, not the translation: it put the human post-edit at 155
+    # term errors against the raw MT's 180, i.e. destroyed the metric's
+    # ability to tell good from bad. Excluded for that dataset only.
+    excl_path = HERE / "data" / "round1_anachronistic_terms.json"
+    if tag == "round1" and excl_path.exists():
+        excluded = set(json.loads(excl_path.read_text(encoding="utf-8")))
+        locked = {zh: v for zh, v in locked.items() if zh not in excluded}
+        print(f"July-era glossary: {len(locked)} locked terms "
+              f"({len(excluded)} post-dated terms excluded)")
 
     out = []
     for field, name in (("mt", "A_production_mt"),
@@ -67,7 +83,7 @@ def main() -> int:
               f"term_err={te:3d} inconsistent={len(conflicts)} "
               f"chrF={ch/len(rows):.3f}")
 
-    path = HERE / "results" / "baseline_rows.json"
+    path = HERE / "results" / f"baseline_rows_{tag}.json"
     path.write_text(json.dumps(out, ensure_ascii=False, indent=2),
                     encoding="utf-8")
     print(f"→ {path}")

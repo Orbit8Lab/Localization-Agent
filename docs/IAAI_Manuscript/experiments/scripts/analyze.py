@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -52,7 +53,11 @@ def table_translation(path: Path) -> str:
     # baseline the paper compares against and the ceiling that makes the
     # other rows interpretable.
     rows = list(d["results"])
-    base = RESULTS / "baseline_rows.json"
+    # Dataset-specific baselines; round1's are July-era corrected.
+    stem = path.stem.replace("translation_", "")
+    base = RESULTS / f"baseline_rows_{'round1' if 'r1' in stem else 'mtpe'}.json"
+    if not base.exists():
+        base = RESULTS / "baseline_rows_mtpe.json"
     if base.exists():
         fixed = json.loads(base.read_text(encoding="utf-8"))
         rows = ([f for f in fixed if f["condition"].startswith("A_")]
@@ -79,19 +84,51 @@ def table_translation(path: Path) -> str:
     return "\n".join(lines)
 
 
+def table_lqa_views(path: Path) -> str:
+    """All three scoring views side by side.
+
+    On the round-1 corpus 70% of rejections carry no bug label (F15), so
+    the full-view recall measures coincidental agreement with fluency
+    rewrites rather than detection. The labelled view is the detector
+    score; the actionable view excludes LOW advisories. Which one is
+    "the" number depends on the consumer, so all three are shown.
+    """
+    d = json.loads(path.read_text(encoding="utf-8"))
+    if not any(r.get("labelled_only") for r in d["results"]):
+        return ""
+    lines = ["### LQA, three scoring views "
+             f"(n={d['n_rows']}, {d['n_rejected']} rejections)",
+             "",
+             "| Condition | all: P | all: R | all: F1 | lab: P | lab: R | lab: F1 | Tokens | Min |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for r in d["results"]:
+        lab = r.get("labelled_only") or {}
+        lines.append(
+            f"| {r['condition']} | {r['precision']:.1%} | {r['recall']:.1%} "
+            f"| {r['f1']:.3f} | {lab.get('precision', 0):.1%} "
+            f"| {lab.get('recall', 0):.1%} | {lab.get('f1', 0):.3f} "
+            f"| {r['tokens']:,.0f} | {r['seconds']/60:.0f} |")
+    return "\n".join(lines)
+
+
 def main() -> int:
+    tag = sys.argv[1] if len(sys.argv) > 1 else "main"
     out = ["# IAAI experiment results", "",
-           "Corpus: project002 (绯月杀), zh→en. Ground truth is the",
-           "professional post-editor's verdict in `mtpe_form.xlsx`.", ""]
-    for tag, fn in (("translation_main.json", table_translation),
-                    ("lqa_main.json", table_lqa)):
-        path = RESULTS / tag
+           f"Run tag: `{tag}`. Corpus: project002 (绯月杀), zh→en.",
+           "Ground truth is the professional post-editor's verdict.", ""]
+    for name, fn in ((f"translation_{tag}.json", table_translation),
+                     (f"lqa_{tag}.json", table_lqa),
+                     (f"lqa_{tag}.json", table_lqa_views)):
+        tag_, fn = name, fn
+        path = RESULTS / tag_
         if path.exists():
-            out += [fn(path), ""]
+            rendered = fn(path)
+            if rendered:
+                out += [rendered, ""]
         else:
-            out += [f"_{tag} not present yet_", ""]
+            out += [f"_{tag_} not present yet_", ""]
     text = "\n".join(out)
-    (RESULTS / "TABLES.md").write_text(text, encoding="utf-8")
+    (RESULTS / f"TABLES_{tag}.md").write_text(text, encoding="utf-8")
     print(text)
     return 0
 
