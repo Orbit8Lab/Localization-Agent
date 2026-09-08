@@ -415,12 +415,29 @@ def _run_check(rule: StyleRule, source: str, target: str):
         count = len(target.split())
         return (count > int(value), f"{count} words")
     if rule.check == "require_source_parity":
-        # trailing punctuation parity: if the source ends with one of the
-        # listed marks, the target must end with a mark too (any of them)
+        # DIRECTIONAL, and deliberately so: the source ending a sentence
+        # obliges the target to end one. The reverse does NOT hold.
+        #
+        # The symmetric version (`src_end != tgt_end`) fired 213 times on
+        # one real 1,349-string corpus, and 212 of those were CORRECT
+        # translations: Chinese item descriptions omit the trailing 。
+        # while English sentences require a period. It flagged
+        # "动物皮背包，耐用容量大" → "A durable leather backpack with plenty
+        # of storage space." as a defect.
+        #
+        # Two costs, and the second is the worse one. The report gains
+        # ~200 false findings — and because T1 CONSUMES the rows it flags,
+        # 154 correctly-translated strings never reached T2 or T3 at all.
+        # A false positive here is not noise, it is suppressed coverage.
+        #
+        # The rule's own rationale argues for this direction: "UI labels
+        # without a period read as buttons; descriptions with one read as
+        # prose." An English description earns its period whether or not
+        # the Chinese carried one.
         marks = str(value)
         src_end = source.rstrip()[-1:] in marks
         tgt_end = target.rstrip()[-1:] in marks
-        return (src_end != tgt_end,
+        return (src_end and not tgt_end,
                 f"source ends {source.rstrip()[-1:]!r}, "
                 f"target ends {target.rstrip()[-1:]!r}")
     return (False, "")

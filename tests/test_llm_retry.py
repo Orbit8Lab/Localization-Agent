@@ -95,9 +95,15 @@ def test_non_transient_fails_immediately(monkeypatch):
 
 
 def test_timeout_is_configured_and_overridable(monkeypatch):
+    """The timeout now comes from the PRESET, not one global constant:
+    deepseek's default model reasons, so it gets the longer budget while
+    non-reasoning vendors keep the fail-fast 120s. An explicit value
+    still wins over both."""
     monkeypatch.setenv("DEEPSEEK_API", "test-key")
-    default = OpenAICompatProvider("deepseek")
-    assert default.timeout == llm.DEFAULT_TIMEOUT == 120
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    assert llm.DEFAULT_TIMEOUT == 120          # the non-reasoning floor
+    assert OpenAICompatProvider("deepseek").timeout == llm.REASONING_TIMEOUT
+    assert OpenAICompatProvider("openai").timeout == llm.DEFAULT_TIMEOUT
     custom = OpenAICompatProvider("deepseek", timeout=30, max_retries=1)
     assert custom.timeout == 30 and custom.max_retries == 1
 

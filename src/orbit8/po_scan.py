@@ -46,16 +46,35 @@ class ScanResult:
 
 def _seed(db: RunDB, entries: List[Tuple[str, str, str, str]]
           ) -> Tuple[Dict[str, dict], List[dict]]:
-    """Dedup by source text (ingest's contract). Returns the uid map and
-    the inconsistency records: one source, several renderings."""
-    by_text: Dict[str, dict] = {}
+    """Dedup by (source text, target text). Returns the uid map and the
+    inconsistency records: one source, several renderings.
+
+    Deduping by SOURCE ALONE — which this did — kept only the FIRST
+    target and attached it to every occurrence. Two failures follow, and
+    the second is silent:
+
+    - A bug row could pair a source with a rendering from a DIFFERENT
+      key: an audit reporting a defect in a translation that was never
+      there. ``external_lqa.seed_audit_db`` was fixed for exactly this;
+      this path never was, so the two entry points disagreed.
+    - T2 rule (a) — same source rendered differently across the asset —
+      became UNREACHABLE. It needs two rows sharing a source, and the
+      dedup guaranteed there was only ever one. Measured on a real
+      1,349-string corpus: 59 genuinely inconsistent sources, and
+      ``t2_flagged`` of 4 where pairing on both sides gives 54.
+
+    Identical (source, target) repeats still collapse, which is the
+    saving the dedup exists for.
+    """
+    by_pair: Dict[Tuple[str, str], dict] = {}
     renderings: Dict[str, Dict[str, List[str]]] = defaultdict(
         lambda: defaultdict(list))
     for key, source, target, location in entries:
         if not source.strip() or not target.strip():
             continue
-        entry = by_text.setdefault(source, {"keys": [], "target": target,
-                                            "locations": []})
+        entry = by_pair.setdefault((source, target),
+                                   {"keys": [], "target": target,
+                                    "locations": []})
         entry["keys"].append(key)
         if location:
             entry["locations"].append(location)
@@ -64,14 +83,17 @@ def _seed(db: RunDB, entries: List[Tuple[str, str, str, str]]
     # ``context`` carries the SourceLocation (the ``#:`` path), not the
     # msgctxt GUID that ``keys`` holds: the widget class — and so the
     # display-width budget — is derivable only from the path.
-    uniques = [UniqueString(uid=f"u{i:04d}", text=text, keys=e["keys"],
+    pairs = list(by_pair.items())
+    uniques = [UniqueString(uid=f"u{i:04d}", text=source, keys=e["keys"],
                             context=(e["locations"][0]
                                      if e["locations"] else None))
-               for i, (text, e) in enumerate(by_text.items())]
+               for i, ((source, _target), e) in enumerate(pairs)]
     db.seed(uniques)
     uid_map: Dict[str, dict] = {}
-    for unique in uniques:
-        entry = by_text[unique.text]
+    # Zipped rather than looked up by text: a source with two renderings
+    # now has two uids, so `by_pair[unique.text]` would be ambiguous —
+    # which is the whole point of the change.
+    for unique, ((source, _target), entry) in zip(uniques, pairs):
         # classification decides which style rules apply and how the
         # string is batched — deterministic signals only here (the #:
         # path); an LLM pass can refine it via classify.classify_batch.
@@ -81,7 +103,7 @@ def _seed(db: RunDB, entries: List[Tuple[str, str, str, str]]
         db.record(unique.uid, status="accepted", target=entry["target"],
                   resolution="external")
         db.label(unique.uid, label.domain, label.confidence)
-        uid_map[unique.uid] = {**entry, "source": unique.text,
+        uid_map[unique.uid] = {**entry, "source": source,
                                "domain": label.domain.value,
                                "domain_source": label.source}
 
@@ -98,6 +120,7 @@ def scan_po(po_path: Path, glossary_path: Optional[Path], out_dir: Path, *,
             source_lang: str = "zh-CN", job_id: str = "standalone-scan",
             deterministic_only: bool = False, batch_story: int = 5,
             batch_string: int = 20, suggestions: bool = True,
+            full_scan: bool = True,
             style_brief=None, style_guide=None,
             on_progress=None) -> ScanResult:
     """Run the full cascade over a bilingual .po and write the review
@@ -154,6 +177,10 @@ def scan_po(po_path: Path, glossary_path: Optional[Path], out_dir: Path, *,
         game=game, source_lang=source_lang, locale=locale,
         batch_size=batch_string, batch_size_story=batch_story,
         deterministic_only=deterministic_only or provider is None,
+        # Default ON here: a standalone scan is what a client bug report
+        # is built from, and shipping a report that checked only some
+        # tiers on some strings costs another round trip.
+        full_scan=full_scan,
         requeue=False,
         gate=GateConfig(source_lang=source_lang, target_lang=locale,
                         locked_terms=locked, term_variants=variants,

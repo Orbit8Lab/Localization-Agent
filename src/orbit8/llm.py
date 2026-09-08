@@ -28,6 +28,18 @@ from pydantic import BaseModel, ValidationError
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 REASONING_HEADROOM = 4096
 
+# Reasoning models think before answering, and that thinking is billed
+# against the same wall clock. Measured on Qwen3.8-27B with a 20-string
+# LQA review batch: 66s typical — close enough to a 120s socket timeout
+# that ordinary variance trips it. A real scan died on two consecutive
+# APITimeoutErrors and made no progress at all.
+#
+# This is a per-VENDOR default rather than a global bump because a
+# non-reasoning model that hangs for 300s is broken and should fail fast;
+# only a model that legitimately spends a minute thinking needs the room.
+# `$ORBIT8_LLM_TIMEOUT`, when set, still wins over both.
+REASONING_TIMEOUT = float(os.getenv("ORBIT8_LLM_TIMEOUT", "300"))
+
 
 @dataclass(frozen=True)
 class Preset:
@@ -49,6 +61,9 @@ class Preset:
     api_key_env: str
     extra_body: Optional[Callable[[], dict]] = None
     headroom: int = 0
+    # Seconds a single call may take before the socket times out. None =
+    # DEFAULT_TIMEOUT. Set it where the preset's default model reasons.
+    timeout: Optional[float] = None
 
     def body(self) -> dict:
         """The kwargs to merge into a chat-completions call."""
@@ -59,9 +74,17 @@ class Preset:
 PROVIDER_PRESETS: Dict[str, Preset] = {
     # DeepSeek's reasoning models bill hidden reasoning tokens against
     # max_tokens, hence the headroom.
-    "deepseek": Preset(DEEPSEEK_BASE_URL, "deepseek-v4-flash", "DEEPSEEK_API",
+    # `pro`, not `flash`, for LQA and translation work. Measured on 60
+    # real project002 pairs at the spec'd batch of 20: pro found 18
+    # findings in 231s, flash found 11 in 70s. Flash is 3.3x faster and
+    # missed ~40% of what pro caught — and a missed defect ships to the
+    # client while a slow scan only costs a coffee. `--model
+    # deepseek-v4-flash` remains one flag away for smoke runs and
+    # throwaway passes, where speed IS the point.
+    "deepseek": Preset(DEEPSEEK_BASE_URL, "deepseek-v4-pro", "DEEPSEEK_API",
                        extra_body=lambda: {"reasoning_effort": "low"},
-                       headroom=REASONING_HEADROOM),
+                       headroom=REASONING_HEADROOM,
+                       timeout=REASONING_TIMEOUT),
     "openai": Preset(None, "gpt-4o-mini", "OPENAI_API_KEY"),
     "qwen": Preset("https://dashscope.aliyuncs.com/compatible-mode/v1",
                    "qwen-plus", "DASHSCOPE_API_KEY"),
@@ -71,9 +94,17 @@ PROVIDER_PRESETS: Dict[str, Preset] = {
     # Qwen3.8 thinks before answering and bills the reasoning, so it needs
     # the same headroom as any other reasoning model: without it the
     # visible budget is spent on tokens the caller never sees.
+    #
+    # NOT the pipeline default, on measured evidence. The HF ROUTER (not
+    # the model) caps request duration and returns 504 Gateway Time-out
+    # on a 20-string Tier-3 review batch — the size docs/skills/
+    # lqa-batch-split.md specifies. DeepSeek serves the same batch in
+    # ~74s (pro) / ~12s (flash). A provider that cannot run the spec'd
+    # batch size forces a per-provider constant nobody can tune.
     "huggingface": Preset("https://router.huggingface.co/v1",
                           "Qwen/Qwen3.8-27B", "HF_API",
-                          headroom=REASONING_HEADROOM),
+                          headroom=REASONING_HEADROOM,
+                          timeout=REASONING_TIMEOUT),
     # NO extra_body: Gemini's OpenAI-compat surface rejects
     # `reasoning_effort`, so sending it 400s every call. Thinking is
     # configured on Gemini's native API, not through this shim.
@@ -140,6 +171,20 @@ RETRY_BACKOFF = 2.0                   # seconds: 2, 4, 8 …
 # reset. Keep it a comfortable multiple of the socket timeout: it is the
 # backstop for a stuck call, not the normal path for a slow one.
 DEADLINE_FACTOR = float(os.getenv("ORBIT8_LLM_DEADLINE_FACTOR", "3.0"))
+
+# ...but the multiple must not be the ONLY bound, because it scales with
+# the thing it is supposed to bound. Raising a reasoning provider's
+# timeout to 300s took the deadline to 900s, and at 3 retries that is 45
+# minutes of hang per call instead of a guard. Observed: a scan sat for
+# 27 HOURS at 0% CPU with no open sockets — the exact failure the
+# deadline exists to prevent, reintroduced by making the deadline
+# proportional.
+#
+# So the effective deadline is min(timeout x factor, this ceiling). A
+# request that has produced nothing in five minutes is not slow, it is
+# dead, and no legitimate batch call in this pipeline runs that long
+# (the slowest measured was 75s).
+DEADLINE_CEILING = float(os.getenv("ORBIT8_LLM_DEADLINE_MAX", "360"))
 
 # Retry only what a retry can fix: timeouts, dropped connections, 429s
 # and 5xx. A 400/401 (bad request, bad key) fails fast — retrying it just
@@ -212,7 +257,7 @@ class _ResilientProvider:
         """
         import threading
 
-        deadline = self.timeout * DEADLINE_FACTOR
+        deadline = min(self.timeout * DEADLINE_FACTOR, DEADLINE_CEILING)
         box: dict = {}
 
         def run():
@@ -281,15 +326,20 @@ class _ResilientProvider:
 class OpenAICompatProvider(_ResilientProvider):
     def __init__(self, name: str = "deepseek", model: Optional[str] = None,
                  api_key: Optional[str] = None, *,
-                 timeout: float = DEFAULT_TIMEOUT,
+                 timeout: Optional[float] = None,
                  max_retries: int = DEFAULT_RETRIES,
                  on_retry: Optional[Callable[[int, str], None]] = None):
         if name not in PROVIDER_PRESETS:
             raise ValueError(
                 f"unknown provider {name!r}; choose from {sorted(PROVIDER_PRESETS)}")
-        super().__init__(timeout=timeout, max_retries=max_retries,
-                         on_retry=on_retry)
         preset = PROVIDER_PRESETS[name]
+        # An explicit timeout wins; otherwise the preset decides, and only
+        # then the global default. `timeout=None` (the default) is what
+        # lets a reasoning preset raise it without every caller knowing.
+        super().__init__(
+            timeout=(timeout if timeout is not None
+                     else (preset.timeout or DEFAULT_TIMEOUT)),
+            max_retries=max_retries, on_retry=on_retry)
         self.name = name
         self.model = model or preset.default_model
         self.preset = preset
@@ -341,12 +391,15 @@ class AnthropicProvider(_ResilientProvider):
 
     def __init__(self, model: Optional[str] = None,
                  api_key: Optional[str] = None, *,
-                 timeout: float = DEFAULT_TIMEOUT,
+                 timeout: Optional[float] = None,
                  max_retries: int = DEFAULT_RETRIES,
                  on_retry: Optional[Callable[[int, str], None]] = None,
                  effort: Optional[str] = None):
-        super().__init__(timeout=timeout, max_retries=max_retries,
-                         on_retry=on_retry)
+        # Claude thinks by default on current models, so it belongs in the
+        # reasoning bracket alongside DeepSeek and Qwen3.8.
+        super().__init__(
+            timeout=timeout if timeout is not None else REASONING_TIMEOUT,
+            max_retries=max_retries, on_retry=on_retry)
         self.name = "anthropic"
         self.model = model or ANTHROPIC_DEFAULT_MODEL
         # Thinking is on by default on current models; `effort` trades

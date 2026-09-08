@@ -72,6 +72,21 @@ class LQAConfig:
     # string ("+5 HP" / "+10 HP") without dragging in merely
     # same-topic text.
     similarity_threshold: float = 0.6
+    # FULL SCAN: every tier sees every string, instead of each tier only
+    # seeing what the previous one passed.
+    #
+    # The cascade was built as a COST ladder, and that logic held when T3
+    # was the expensive part of a scan. It no longer is: a full
+    # 1,349-string audit is cheap, and the filtering has a real price —
+    # a string with a trailing-space defect (T1) was never checked for
+    # inconsistency (T2) or meaning (T3), so its OTHER problems surfaced
+    # only on the next round trip, after the client had already seen the
+    # report. One scan that finds everything beats three that each find
+    # one thing.
+    #
+    # Off by default so a caller who wants the ladder still gets it; the
+    # CLI turns it on.
+    full_scan: bool = False
     deterministic_only: bool = False      # T1+T2 only, zero LLM calls
     second_layer: bool = True
     requeue: bool = True                  # flagged strings back to G3 review
@@ -139,7 +154,12 @@ def build_lqa_graph(ctx: LQAContext):
                     finding.tier = 1
                 found[row["uid"]] = findings
         return {"findings_t1": found,
-                "ledger": {"accepted": len(rows), "t1_flagged": len(found)}}
+                # `full_scan` rides in the ledger, not just the config:
+                # the report is the artifact a reader gets six weeks
+                # later, and "did every tier see every string?" must be
+                # answerable from it alone.
+                "ledger": {"accepted": len(rows), "t1_flagged": len(found),
+                           "full_scan": 1 if cfg.full_scan else 0}}
 
     # ------------------------------------- T2 project-level consistency
 
@@ -148,7 +168,8 @@ def build_lqa_graph(ctx: LQAContext):
         across different menus is invisible to any segment-scoped check —
         this pass holds the whole locale in scope."""
         t1 = state.get("findings_t1", {})
-        rows = [r for r in _accepted() if r["uid"] not in t1]
+        rows = (_accepted() if cfg.full_scan
+                else [r for r in _accepted() if r["uid"] not in t1])
         found: Dict[str, List[Finding]] = {}
         ledger = dict(state.get("ledger", {}))
         ledger["t2_input"] = len(rows)
@@ -217,7 +238,8 @@ def build_lqa_graph(ctx: LQAContext):
     def tier3(state: LQAState) -> dict:
         flagged = set(state.get("findings_t1", {})) | set(
             state.get("findings_t2", {}))
-        survivors = [r for r in _accepted() if r["uid"] not in flagged]
+        survivors = (_accepted() if cfg.full_scan
+                     else [r for r in _accepted() if r["uid"] not in flagged])
         ledger = dict(state.get("ledger", {}))
         ledger["t3_input"] = len(survivors)
         if cfg.deterministic_only or ctx.provider is None:
@@ -311,11 +333,19 @@ def build_lqa_graph(ctx: LQAContext):
                         and ctx.provider is not None)
         ledger["second_layer"] = int(second_layer)
 
-        for uid, findings in {**state.get("findings_t1", {}),
-                              **state.get("findings_t2", {})}.items():
-            verified.setdefault(uid, []).extend(
-                VerifiedFinding(finding=f).model_dump(mode="json")
-                for f in findings)
+        # Concatenate the tiers, never dict-merge them. `{**t1, **t2}`
+        # keys on uid, so a string flagged by BOTH tiers kept only T2's
+        # findings and silently lost T1's — a terminology defect
+        # disappearing because the same string also had a consistency
+        # one. In ladder mode the overlap was empty (T2 only saw T1
+        # survivors) so the bug was invisible; under full_scan every
+        # overlapping string hits it.
+        for tier_findings in (state.get("findings_t1", {}),
+                              state.get("findings_t2", {})):
+            for uid, findings in tier_findings.items():
+                verified.setdefault(uid, []).extend(
+                    VerifiedFinding(finding=f).model_dump(mode="json")
+                    for f in findings)
 
         audit = list(state.get("t3_audit", []))
 
@@ -469,13 +499,28 @@ def verify_cascade(report: LQAReport) -> List[str]:
         return [f"cascade_ledger missing {missing} — "
                 f"one or more tiers never ran"]
 
-    # -- the telescope: each tier saw exactly what the previous one passed
-    check(led["t2_input"] == led["accepted"] - led["t1_flagged"],
-          f"T2 input {led['t2_input']} != accepted {led['accepted']} - "
-          f"T1 flagged {led['t1_flagged']}")
-    check(led["t3_input"] == led["t2_input"] - led["t2_flagged"],
-          f"T3 input {led['t3_input']} != T2 input {led['t2_input']} - "
-          f"T2 flagged {led['t2_flagged']}")
+    # -- coverage: what each tier actually saw.
+    #
+    # Two legal shapes, and the audit must not accept a run that is
+    # neither. In LADDER mode the counts telescope — each tier sees what
+    # the previous one passed. In FULL-SCAN mode every tier sees every
+    # accepted string, which is a stronger claim, not a weaker one.
+    # Checking only the telescope would reject a full scan; checking
+    # neither would let a tier silently skip strings.
+    if led.get("full_scan"):
+        check(led["t2_input"] == led["accepted"],
+              f"full scan: T2 input {led['t2_input']} != accepted "
+              f"{led['accepted']} — a tier skipped strings")
+        check(led["t3_input"] == led["accepted"],
+              f"full scan: T3 input {led['t3_input']} != accepted "
+              f"{led['accepted']} — a tier skipped strings")
+    else:
+        check(led["t2_input"] == led["accepted"] - led["t1_flagged"],
+              f"T2 input {led['t2_input']} != accepted {led['accepted']} - "
+              f"T1 flagged {led['t1_flagged']}")
+        check(led["t3_input"] == led["t2_input"] - led["t2_flagged"],
+              f"T3 input {led['t3_input']} != T2 input {led['t2_input']} - "
+              f"T2 flagged {led['t2_flagged']}")
     check(report.checked == led["accepted"],
           f"report.checked {report.checked} != ledger accepted "
           f"{led['accepted']}")

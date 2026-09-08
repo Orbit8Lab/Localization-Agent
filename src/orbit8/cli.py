@@ -711,6 +711,8 @@ def _cmd_po_scan(args) -> int:
         source_lang=args.source_lang,
         deterministic_only=args.deterministic_only,
         suggestions=not args.no_suggestions,
+        full_scan=not args.ladder,
+        batch_string=args.batch_string, batch_story=args.batch_story,
         on_progress=None if args.deterministic_only else on_progress)
     if progress["done"] or progress["failed"]:
         print()
@@ -1712,6 +1714,84 @@ def _cmd_chat_trace(args) -> int:
     return 0
 
 
+def _cmd_replay(args) -> int:
+    """Re-run a past scan's inputs on today's code and diff the results.
+
+    Guards the whole deterministic cascade against a refactor, using real
+    client strings rather than invented fixtures.
+    """
+    from .replay import (compare, fingerprint_report, fingerprint_stored,
+                         find_runs, read_run, replay, write_baseline)
+
+    if args.list:
+        runs = find_runs(Path(args.target))
+        if not runs:
+            print(f"no scan_report.json under {args.target}")
+            return 1
+        for report in runs[:args.limit]:
+            run = read_run(report)
+            state = "ok" if run.replayable else f"UNREPLAYABLE ({run.missing[0]})"
+            print(f"{report.parent.name:44s} flagged={run.flagged}  {state}")
+        return 0
+
+    run = read_run(Path(args.target))
+    if not run.replayable:
+        for problem in run.missing:
+            print(f"✗ {problem}", file=sys.stderr)
+        return 1
+    print(f"replaying {run.po.name} (deterministic tiers only)")
+    result = replay(run, Path(args.out), game=args.game, locale=args.locale,
+                    source_lang=args.source_lang)
+    new = fingerprint_report(result.report)
+
+    if args.write_baseline:
+        path = write_baseline(result.report, Path(args.write_baseline),
+                              note=args.note or str(run.report_path))
+        print(f"✓ baseline written: {path}  ({len(new)} items)")
+        return 0
+
+    baseline = Path(args.baseline) if args.baseline else None
+    if baseline is None:
+        # No baseline: the only honest comparison left is the ledger,
+        # because historical reports never stored per-item findings.
+        print("\nno --baseline given; comparing the cascade ledger only")
+        print(f"{'ledger':18s} {'STORED':>7} {'NOW':>7}")
+        keys = sorted(set(run.ledger) | set(result.report.cascade_ledger))
+        drift = False
+        for key in keys:
+            old = run.ledger.get(key, "-")
+            now = result.report.cascade_ledger.get(key, "-")
+            mark = "" if old == now else "   <-- differs"
+            drift = drift or bool(mark)
+            print(f"{key:18s} {old:>7} {now:>7}{mark}")
+        if drift:
+            print("\nA difference is EXPECTED when code or config changed "
+                  "since that run.\nThe stored report records its inputs "
+                  "but not its code version or\nstyle-guide settings, so "
+                  "treat this as a prompt to investigate,\nnot a failure. "
+                  "Use --write-baseline before a refactor for an\n"
+                  "item-level comparison you CAN trust.")
+        return 0
+
+    comparison = compare(fingerprint_stored(baseline), new,
+                         ledger_old=json.loads(
+                             baseline.read_text(encoding="utf-8")
+                         ).get("cascade_ledger", {}),
+                         ledger_new=result.report.cascade_ledger)
+    print()
+    print(comparison.summary())
+    for uid, old, now in comparison.changed[:args.show]:
+        print(f"\n  {uid}\n    was: {list(old)}\n    now: {list(now)}")
+    if comparison.changed and len(comparison.changed) > args.show:
+        print(f"\n  … {len(comparison.changed) - args.show} more "
+              f"(raise --show)")
+    if comparison.identical:
+        print("\n✓ identical to baseline")
+        return 0
+    print("\n✗ differs from baseline")
+    return 1
+
+
 def _cmd_status(args) -> int:
     job = Job(Path(args.root), args.job_id)
     control = job.control
@@ -2175,6 +2255,21 @@ def main(argv=None) -> int:
     pscan.add_argument("--game", help="game name for prompts/report")
     pscan.add_argument("--locale", default="en")
     pscan.add_argument("--source-lang", default="zh-CN")
+    # Sized for the SERVER, not just the model. The HF router returns a
+    # 504 Gateway Time-out on a 20-string Qwen3.8 review batch — the
+    # gateway caps request duration independently of our client timeout,
+    # so raising the timeout alone cannot fix it. 12 completes in ~65s.
+    pscan.add_argument("--batch-string", type=int, default=20,
+                       help="Tier-3 batch size for pure strings "
+                            "(default 20; lower it if the provider's "
+                            "gateway times out)")
+    pscan.add_argument("--batch-story", type=int, default=5,
+                       help="Tier-3 batch size for story text (default 5)")
+    pscan.add_argument("--ladder", action="store_true",
+                       help="stop at the first tier that flags a string "
+                            "(cheaper, but a string's OTHER defects wait "
+                            "for the next round trip). Default is a full "
+                            "scan: every tier sees every string.")
     pscan.add_argument("--provider", default="deepseek",
                        choices=PROVIDER_NAMES)
     pscan.add_argument("--model")
@@ -2184,9 +2279,13 @@ def main(argv=None) -> int:
     pscan.add_argument("--no-glossary", action="store_true",
                        help="run without a glossary (mechanical checks "
                             "only) instead of failing when none is found")
-    pscan.add_argument("--timeout", type=float, default=120.0,
-                       help="seconds per LLM request before giving up "
-                            "on it (default 120)")
+    # No default: a hardcoded 120 here OVERRODE the provider preset, so
+    # a reasoning model that needs 300s got 120 anyway and the scan died
+    # on repeated timeouts. Unset means "let the provider decide".
+    pscan.add_argument("--timeout", type=float,
+                       help="seconds per LLM request before giving up on "
+                            "it (default: the provider's own — 300 for "
+                            "reasoning models, 120 otherwise)")
     pscan.add_argument("--retries", type=int, default=3,
                        help="attempts per request on timeout/5xx/429 "
                             "(default 3, exponential backoff)")
@@ -2484,6 +2583,35 @@ def main(argv=None) -> int:
     ctrace.add_argument("--full", action="store_true",
                         help="do not truncate args/results")
     ctrace.set_defaults(func=_cmd_chat_trace)
+
+    replay_p = sub.add_parser(
+        "replay",
+        help="re-run a past scan's inputs on today's code and diff",
+        description="Regression-test the deterministic cascade against a "
+                    "real past run. T3 is skipped: it calls a model, and a "
+                    "model is not a fixture.")
+    replay_p.add_argument(
+        "target",
+        help="a scan_report.json to replay, or (with --list) a directory "
+             "to search for them")
+    replay_p.add_argument("--list", action="store_true",
+                          help="list replayable runs under target")
+    replay_p.add_argument("--limit", type=int, default=20)
+    replay_p.add_argument("--out", default="replay-out",
+                          help="scratch directory for the replay outputs")
+    replay_p.add_argument("--baseline",
+                          help="baseline JSON to compare against "
+                               "(from --write-baseline)")
+    replay_p.add_argument("--write-baseline", metavar="PATH",
+                          help="freeze this replay as a golden file; run "
+                               "BEFORE a refactor, compare after")
+    replay_p.add_argument("--note", help="recorded in the baseline")
+    replay_p.add_argument("--game", default="")
+    replay_p.add_argument("--locale", default="en")
+    replay_p.add_argument("--source-lang", default="zh-CN")
+    replay_p.add_argument("--show", type=int, default=10,
+                          help="how many changed items to print")
+    replay_p.set_defaults(func=_cmd_replay)
 
     status = sub.add_parser("status", help="phase + gate states")
     status.add_argument("root")

@@ -63,3 +63,41 @@ def test_exceptions_propagate_unchanged(provider):
         raise ValueError("bad request")
     with pytest.raises(ValueError, match="bad request"):
         provider._with_deadline(boom)
+
+
+def test_the_deadline_is_absolutely_capped(monkeypatch):
+    """A multiple of the timeout scales with the thing it is supposed to
+    bound. Raising a reasoning provider's timeout to 300s took the
+    deadline to 900s, and at 3 retries that is 45 minutes of hang per
+    call rather than a guard — a real scan then sat for 27 HOURS at 0%
+    CPU with no open sockets, which is precisely the failure the deadline
+    exists to prevent.
+    """
+    monkeypatch.setenv("DEEPSEEK_API", "test-key")
+    from orbit8.llm import (DEADLINE_CEILING, DEADLINE_FACTOR,
+                            OpenAICompatProvider)
+
+    # A long reasoning timeout must NOT buy a proportionally long hang.
+    slow = OpenAICompatProvider("deepseek", timeout=300)
+    assert min(slow.timeout * DEADLINE_FACTOR,
+               DEADLINE_CEILING) == DEADLINE_CEILING
+
+    # A short timeout still gets the multiple — the cap is a ceiling, not
+    # a floor, so a fast provider keeps failing fast.
+    quick = OpenAICompatProvider("deepseek", timeout=10)
+    assert min(quick.timeout * DEADLINE_FACTOR,
+               DEADLINE_CEILING) == 10 * DEADLINE_FACTOR
+
+
+def test_a_long_timeout_still_fires_the_deadline(monkeypatch):
+    """The end-to-end property: a hung call under a 300s timeout must
+    still be abandoned, and within the ceiling rather than 900s."""
+    monkeypatch.setenv("DEEPSEEK_API", "test-key")
+    monkeypatch.setattr("orbit8.llm.DEADLINE_CEILING", 2.0)
+    from orbit8.llm import OpenAICompatProvider
+
+    provider = OpenAICompatProvider("deepseek", timeout=300, max_retries=1)
+    start = time.time()
+    with pytest.raises(APITimeoutError):
+        provider._with_deadline(lambda: time.sleep(60))
+    assert time.time() - start < 10, "deadline ignored the ceiling"

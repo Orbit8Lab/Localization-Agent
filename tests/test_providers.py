@@ -208,10 +208,12 @@ def test_satisfies_the_provider_protocol(monkeypatch):
 
 # ------------------------------------------------------ configured defaults
 
-def test_deepseek_defaults_to_flash():
-    """The operator's choice for the chat agent: flash routes tool calls,
-    which is constant cheap work rather than a translation batch."""
-    assert PROVIDER_PRESETS["deepseek"].default_model == "deepseek-v4-flash"
+def test_deepseek_defaults_to_pro():
+    """Recall beats latency for a client-facing audit. Measured on 60 real
+    project002 pairs at batch 20: pro found 18 findings in 231s, flash
+    found 11 in 70s — 3.3x faster, ~40% of the findings missed. A missed
+    defect ships; a slow scan costs a coffee."""
+    assert PROVIDER_PRESETS["deepseek"].default_model == "deepseek-v4-pro"
 
 
 def test_huggingface_default_is_a_router_qualified_id():
@@ -220,3 +222,52 @@ def test_huggingface_default_is_a_router_qualified_id():
     model = PROVIDER_PRESETS["huggingface"].default_model
     assert model == "Qwen/Qwen3.8-27B"
     assert model.count("/") == 1 and not model.startswith("/")
+
+
+# -------------------------------------------------------------- timeouts
+
+def test_reasoning_presets_get_a_longer_timeout(monkeypatch):
+    """A reasoning model thinks before answering, and that thinking is
+    billed against the same wall clock. Measured on Qwen3.8-27B: a
+    20-string LQA review batch takes ~66s, close enough to a 120s socket
+    timeout that ordinary variance trips it — a real scan died on two
+    consecutive APITimeoutErrors and made no progress at all."""
+    for name in ("deepseek", "huggingface"):
+        monkeypatch.setenv(PROVIDER_PRESETS[name].api_key_env, "k")
+        assert build_provider(name).timeout == llm.REASONING_TIMEOUT
+
+
+def test_non_reasoning_presets_still_fail_fast(monkeypatch):
+    """A model that does NOT think and hangs for 300s is broken; giving
+    it the reasoning budget would just delay the report."""
+    for name in ("gemini", "openai", "qwen"):
+        monkeypatch.setenv(PROVIDER_PRESETS[name].api_key_env, "k")
+        assert build_provider(name).timeout == llm.DEFAULT_TIMEOUT
+
+
+def test_an_explicit_timeout_still_wins(monkeypatch):
+    monkeypatch.setenv("HF_API", "k")
+    assert build_provider("huggingface", timeout=45).timeout == 45
+
+
+def test_timeout_none_defers_to_the_preset(monkeypatch):
+    """The CLI passes None when the operator gave no --timeout. It used to
+    pass a hardcoded 120, which OVERRODE the preset and reintroduced the
+    exact failure the preset exists to prevent."""
+    monkeypatch.setenv("HF_API", "k")
+    assert build_provider("huggingface",
+                          timeout=None).timeout == llm.REASONING_TIMEOUT
+
+
+def test_the_scan_cli_does_not_hardcode_a_timeout():
+    """Pinned at the source: a default on the argument silently beats the
+    provider's own choice."""
+    import argparse
+    import inspect
+
+    from orbit8 import cli
+    source = inspect.getsource(cli.main)
+    assert '"--timeout", type=float, default=120' not in source
+    parser_default = argparse.ArgumentParser()
+    parser_default.add_argument("--timeout", type=float)
+    assert parser_default.parse_args([]).timeout is None

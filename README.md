@@ -416,10 +416,10 @@ ran. Pick one per command with `--provider`:
 
 | `--provider` | Key env var | Notes |
 |---|---|---|
-| `deepseek` (default) | `DEEPSEEK_API` | `deepseek-v4-flash`; reasoning headroom added |
+| `deepseek` (default) | `DEEPSEEK_API` | `deepseek-v4-pro`; reasoning headroom + 300s timeout |
 | `openai` | `OPENAI_API_KEY` | |
 | `qwen` | `DASHSCOPE_API_KEY` | DashScope compatible-mode |
-| `huggingface` | `HF_API` | `Qwen/Qwen3.8-27B`; ids are exactly `org/model` |
+| `huggingface` | `HF_API` | `Qwen/Qwen3.8-27B`; ids are exactly `org/model`. The router 504s on a 20-string Tier-3 batch — lower `--batch-string` if you use it |
 | `gemini` | `GEMINI_API` | OpenAI-compat endpoint |
 | `anthropic` | `ANTHROPIC_API_KEY` | needs `uv sync --extra anthropic` |
 
