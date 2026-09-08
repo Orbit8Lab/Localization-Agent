@@ -104,6 +104,13 @@ class GateConfig:
     # a fact about short labels, not a defect. Such strings need a real
     # per-widget max_len, not a ratio.
     min_width_for_ratio: int = 6
+    # Report width-ratio outliers as LOW/advisory rather than MEDIUM
+    # defects. Default ON: without real per-widget geometry the check
+    # cannot distinguish overflow from ordinary zh→en expansion, and it
+    # was measured at 16 of 22 false positives on adjudicated data.
+    # Set False on a project that supplies max_len and wants the
+    # heuristic treated as a defect.
+    width_ratio_advisory: bool = True
     ko_hanja_max_run: int = 3
     ko_hanja_ratio: float = 0.25
     # Style rules whose enforcement bin is "mechanical" (style_guide.py).
@@ -623,21 +630,45 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
                     f"({display_width(target)} > {max_len} columns).",
             evidence=target[:80]))
 
-    # 6b. display-width expansion, scoped by string type. This is the check
-    #     that catches UI overflow when no per-widget max_len exists — the
-    #     normal case, since a .po carries no geometry. MEDIUM on purpose:
-    #     it is a risk signal for a post-editor, not proof of a defect, and
-    #     the only certain answer comes from seeing the string in-game.
+    # 6b. display-width expansion, scoped by string type. Catches UI
+    #     overflow when no per-widget max_len exists — the normal case,
+    #     since a .po carries no geometry.
+    #
+    #     Now LOW severity, and excluded from client bug reports by
+    #     default (`width_ratio_advisory`). Measured on 174
+    #     professionally adjudicated zh→en strings: this check produced
+    #     3 true positives and 16 FALSE positives — 16 of the 22 total
+    #     false positives, a fixed block no other layer clears. Turning
+    #     it off costs 1 true positive and lifts precision from 62.7% to
+    #     83.7%.
+    #
+    #     Worse than a low threshold: on this corpus width has no
+    #     discriminative power at all. Strings the post-editor ACCEPTED
+    #     are wider on average than those they rejected (UI 2.12x vs
+    #     1.94x, System 2.03x vs 1.94x), so no re-tuning of the ceiling
+    #     recovers precision. The budget was honestly derived — p95 of
+    #     9,597 shipped en→zh pairs from two commercial titles — and its
+    #     own comment flagged that those corpora ran the opposite
+    #     direction. Expansion INTO English is normal, not suspicious.
+    #
+    #     Kept rather than deleted because it is real signal on projects
+    #     that supply geometry; check 6 (hard max_len) is the reliable
+    #     path and runs above.
     budget = cfg.width_budget.get(string_type or "") if string_type else None
     if budget and display_width(stripped_src) >= cfg.min_width_for_ratio:
         ratio = width_ratio(stripped_src, stripped_tgt)
         if ratio > budget:
             findings.append(Finding(
-                key=key, bug_type=BugType.LENGTH, severity=Severity.MEDIUM,
+                key=key, bug_type=BugType.LENGTH,
+                severity=(Severity.LOW if cfg.width_ratio_advisory
+                          else Severity.MEDIUM),
                 message=f"{string_type} target renders "
                         f"{display_width(stripped_tgt)} columns vs source "
                         f"{display_width(stripped_src)} ({ratio:.1f}x, "
-                        f"budget {budget}x) — UI overflow risk.",
+                        f"budget {budget}x) — UI overflow RISK, unverified: "
+                        f"no per-widget width is known for this string, and "
+                        f"expansion into English is normal. Confirm in-game "
+                        f"before filing.",
                 evidence=target[:80]))
 
     # 7. length-ratio sanity (loose; expansion tuning comes from style
