@@ -105,11 +105,21 @@ class GateConfig:
 
 
 def term_in_text(term: str, text: str) -> bool:
-    """CJK-safe term matching: ``\\b`` never fires next to Han characters,
-    so boundary anchors apply only on ASCII term edges."""
+    """CJK-safe term matching.
+
+    The docstring here used to claim CJK-safety while doing the
+    opposite: it anchored ASCII term edges with ``\\b``, and since
+    Python's ``\\w`` includes Han there is no boundary between 毁 and
+    the B of BOSS — so a Latin term embedded in Chinese matched
+    NOTHING. The guard is only meaningful against another Latin
+    character, so it is written that way. See `term_spans` for the
+    measured consequence.
+    """
     term_l, text_l = term.lower(), text.lower()
-    left = r"\b" if (term_l[:1].isascii() and term_l[:1].isalnum()) else ""
-    right = r"\b" if (term_l[-1:].isascii() and term_l[-1:].isalnum()) else ""
+    left = r"(?<![0-9A-Za-z])" if (term_l[:1].isascii()
+                                   and term_l[:1].isalnum()) else ""
+    right = r"(?![0-9A-Za-z])" if (term_l[-1:].isascii()
+                                   and term_l[-1:].isalnum()) else ""
     if not left and not right:
         return term_l in text_l
     return re.search(left + re.escape(term_l) + right, text_l) is not None
@@ -119,8 +129,22 @@ def term_spans(term: str, text: str) -> List[tuple]:
     """Every ``(start, end)`` where `term` matches, same rules as
     `term_in_text`. Positions are what makes longest-match possible."""
     term_l, text_l = term.lower(), text.lower()
-    left = r"\b" if (term_l[:1].isascii() and term_l[:1].isalnum()) else ""
-    right = r"\b" if (term_l[-1:].isascii() and term_l[-1:].isalnum()) else ""
+    # `\b` guards an ASCII term so "spirit" does not match inside
+    # "spirited". But Python's `\w` includes Han, so in CJK source there
+    # is NO boundary between 毁 and the B of BOSS and the term matched
+    # nothing at all: on project002 the glossary locked BOSS -> "Boss"
+    # while every occurrence shipped as "BOSS", because the term never
+    # reached the translator's brief or the gate.
+    #
+    # The guard is only meaningful against ANOTHER Latin letter, so it is
+    # expressed that way: forbid a Latin/digit neighbour rather than
+    # demand a word boundary. Han, punctuation and string edges all
+    # satisfy it, which is what makes an embedded Latin term reachable
+    # while "spirited" is still excluded.
+    left = r"(?<![0-9A-Za-z])" if (term_l[:1].isascii()
+                                   and term_l[:1].isalnum()) else ""
+    right = r"(?![0-9A-Za-z])" if (term_l[-1:].isascii()
+                                   and term_l[-1:].isalnum()) else ""
     pattern = left + re.escape(term_l) + right
     return [(m.start(), m.end()) for m in re.finditer(pattern, text_l)]
 

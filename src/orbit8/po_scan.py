@@ -186,6 +186,27 @@ def scan_po(po_path: Path, glossary_path: Optional[Path], out_dir: Path, *,
                         locked_terms=locked, term_variants=variants,
                         term_forms=forms, term_case=term_case,
                         style_guide=style_guide))
+    # Is the glossary REACHABLE here, not merely configured? A locked
+    # term that matches nothing raises no finding and logs nothing, so
+    # silence is indistinguishable from compliance — which is how a
+    # Latin-in-CJK matcher bug hid `BOSS -> Boss` for eleven client
+    # rounds while every occurrence shipped wrong. Reported before the
+    # cascade runs so the operator sees it even if a later tier fails.
+    coverage = None
+    if locked:
+        from .glossary_coverage import measure as measure_coverage
+        coverage = measure_coverage(
+            [(zh, en) for _k, zh, en, _loc in entries],
+            locked, target_lang=locale, term_case=term_case,
+            term_forms=forms)
+        if on_progress:
+            on_progress("glossary_coverage", {
+                "locked": coverage.locked, "matched": coverage.matched,
+                "reach": round(coverage.reach, 3),
+                "occurrences": coverage.occurrences})
+            for note in coverage.warnings():
+                on_progress("glossary_coverage_warning", {"note": note})
+
     ctx = LQAContext(provider=provider, cfg=cfg, run_db=db,
                      glossary=glossary, style_brief=style_brief,
                      style_guide=style_guide, on_progress=on_progress)
@@ -267,6 +288,17 @@ def scan_po(po_path: Path, glossary_path: Optional[Path], out_dir: Path, *,
          "by_severity": report.by_severity,
          "cascade_ledger": report.cascade_ledger,
          "inconsistent_sources": len(inconsistent),
+         # Glossary reachability, in the artifact rather than only the
+         # log: "no terminology findings" means nothing unless the
+         # operator can also see that the terms were actually looked for.
+         "glossary_coverage": ({
+             "locked": coverage.locked, "matched": coverage.matched,
+             "reach": round(coverage.reach, 3),
+             "occurrences": coverage.occurrences,
+             "unmatched": sorted(coverage.unmatched),
+             "never_applied": sorted(coverage.never_applied),
+             "warnings": coverage.warnings(),
+         } if coverage is not None else None),
          "suggestions": len(fixes),
          "suggestions_rejected": len(rejected_fixes),
          "bug_rows": bug_rows, "pe_rows": len(rows)},
