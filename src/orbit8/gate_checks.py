@@ -120,6 +120,18 @@ class GateConfig:
     style_guide: object = None
 
 
+def _scripts_for(lang: str) -> set:
+    """Expected scripts for a locale tag, falling back to its base tag.
+
+    `zh-CN` -> `zh`, `pt-BR` -> `pt`. An unknown language yields an
+    empty set, which callers read as "no expectation".
+    """
+    tag = (lang or "").lower()
+    if tag in ALLOWED_SCRIPTS:
+        return ALLOWED_SCRIPTS[tag]
+    return ALLOWED_SCRIPTS.get(tag.split("-")[0], set())
+
+
 def term_in_text(term: str, text: str) -> bool:
     """CJK-safe term matching.
 
@@ -606,7 +618,16 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
     #    — "Error", "Text Block" and other dev-English placeholders are
     #    CORRECT when echoed verbatim, so identity is only evidence of an
     #    untranslated string when the source is actually in source_lang.
-    src_scripts_expected = ALLOWED_SCRIPTS.get(cfg.source_lang.lower(), set())
+    # Locale tags are looked up with a base-tag fallback: the table has
+    # `zh` and `zh-tw`, while po_scan passes `zh-CN`. The exact-match
+    # lookup missed, so `src_scripts_expected` came back EMPTY and
+    # `source_has_own_script` defaulted to True — disabling this guard
+    # for the one language pair the project actually runs. Result on
+    # 1,233 rows: 6 false positives on strings that are identical
+    # because they contain nothing to translate ("(0/3)", "Lv.1"),
+    # all of which the post-editor accepted. Regional tags are the norm
+    # (pt-BR, zh-Hans, en-GB), so normalise rather than add one row.
+    src_scripts_expected = _scripts_for(cfg.source_lang)
     source_has_own_script = not src_scripts_expected or any(
         re.search(f"[{SCRIPT_RANGES[s]}]", stripped_src)
         for s in src_scripts_expected)
@@ -629,8 +650,14 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
                     if f.bug_type != BugType.TERMINOLOGY]
 
     # 5. source-script leakage (e.g. Han characters in a ru target)
-    src_scripts = ALLOWED_SCRIPTS.get(cfg.source_lang.lower(), set())
-    tgt_scripts = ALLOWED_SCRIPTS.get(cfg.target_lang.lower(), set())
+    # Same base-tag fallback as check 4. With an exact-match lookup and
+    # source_lang="zh-CN", `src_scripts` was EMPTY, so `src - tgt` was
+    # empty and this HIGH-severity check never ran at all: Han
+    # characters leaking into an English target went undetected for the
+    # project's actual locale. A check that silently does not run is
+    # indistinguishable from one that passes.
+    src_scripts = _scripts_for(cfg.source_lang)
+    tgt_scripts = _scripts_for(cfg.target_lang)
     for script in src_scripts - tgt_scripts:
         leaked = re.findall(f"[{SCRIPT_RANGES[script]}]+", stripped_tgt)
         leaked = [run for run in leaked
