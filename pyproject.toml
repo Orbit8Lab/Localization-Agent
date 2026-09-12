@@ -13,6 +13,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The HTTP surface is optional: the CLI and the test suite must stay
+# runnable without a web stack installed.
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+]
 # Anthropic speaks its own wire protocol rather than the OpenAI-compatible
 # one every other provider shares, so it needs its own SDK. Optional: the
 # import is lazy and no other provider depends on it.

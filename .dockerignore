@@ -1,0 +1,17 @@
+# Keep the build context small and the image free of anything
+# client-derived. The repo is public, but the image should not carry
+# even the local scratch that never gets committed.
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+docs/
+jobs/
+tests/
+*.md
+!README.md
+.DS_Store
+.env
+.env.*
