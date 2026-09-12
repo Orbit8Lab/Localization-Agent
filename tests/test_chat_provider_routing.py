@@ -71,7 +71,13 @@ def test_translate_po_refuses_in_dry_run_instead_of_billing(tmp_path: Path):
 def test_no_tool_constructs_its_own_client():
     """The regression, pinned at the source: a hardcoded vendor name in a
     tool body silently overrides the operator's --provider."""
-    source = Path("src/orbit8/orchestrator.py").read_text(encoding="utf-8")
+    # Anchored to THIS file, not the CWD: a relative path passes from the
+    # repo root and dies with FileNotFoundError anywhere else — an IDE
+    # runner, a CI step with a different working directory, `pytest` from
+    # a subdirectory. A guard test that cannot run is not a guard.
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "src" / "orbit8" / "orchestrator.py").read_text(
+        encoding="utf-8")
     assert "OpenAICompatProvider" not in source, (
         "a chat tool builds its own provider; use _locale_provider so the "
         "session's --provider is honoured")

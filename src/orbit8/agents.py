@@ -95,7 +95,8 @@ def translate_batch(provider: Provider, items: List[Tuple[str, str]], *,
                     style_brief: Optional[StyleBrief] = None,
                     tm_examples: Optional[List[Tuple[str, str]]] = None,
                     temperature: float = 0.3,
-                    style_guide=None
+                    style_guide=None,
+                    conversation: bool = False
                     ) -> Tuple[BatchTranslation, str]:
     """docs/agents/translator.md — domain-aware (design LIFECYCLE S2→S4).
     ``style_guide`` supplies the per-language-pair rules for this
@@ -120,8 +121,19 @@ def translate_batch(provider: Provider, items: List[Tuple[str, str]], *,
         sections.append(
             "**EXISTING TRANSLATIONS (match their style/terms):**\n"
             + "\n".join(f'- "{s}" → "{t}"' for s, t in tm_examples[:3]))
-    sections += [PRESERVE_RULES,
-                 f"Translate each item into {target_lang}:",
+    lead = f"Translate each item into {target_lang}:"
+    if conversation:
+        # The batch IS an exchange, in order. Saying so is what turns a
+        # list of independent strings into context the model can use for
+        # pronouns, honorifics, and callbacks to an earlier line — the
+        # whole reason story batches are built by conversation.
+        lead = (
+            f"The items below are CONSECUTIVE LINES OF ONE CONVERSATION, "
+            f"in order. Translate each into {target_lang}, keeping "
+            f"register, character voice and terms consistent ACROSS the "
+            f"whole exchange, and resolving pronouns and callbacks using "
+            f"the surrounding lines. Return every item separately:")
+    sections += [PRESERVE_RULES, lead,
                  _render_batch(items),
                  _json_shape([k for k, _ in items])]
     user = "\n\n".join(s for s in sections if s)

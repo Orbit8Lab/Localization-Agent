@@ -48,15 +48,29 @@ class RunDB:
                 status TEXT NOT NULL DEFAULT 'pending',
                 target TEXT,
                 resolution TEXT,
-                findings_json TEXT NOT NULL DEFAULT '[]'
+                findings_json TEXT NOT NULL DEFAULT '[]',
+                group_id TEXT,
+                seq INTEGER
             )""")
+        # Additive migration: a job seeded before grouping existed keeps
+        # working, it just batches the old way (group_id NULL → the blind
+        # slice). Dropping the DB to gain grouping would throw away every
+        # translation already accepted in it.
+        existing = {row[1] for row in
+                    self.conn.execute("PRAGMA table_info(segments)")}
+        for column, decl in (("group_id", "TEXT"), ("seq", "INTEGER")):
+            if column not in existing:
+                self.conn.execute(
+                    f"ALTER TABLE segments ADD COLUMN {column} {decl}")
         self.conn.commit()
 
     def seed(self, uniques: List[UniqueString]) -> None:
         self.conn.executemany(
-            "INSERT OR IGNORE INTO segments (uid, text, keys_json, context) "
-            "VALUES (?, ?, ?, ?)",
-            [(u.uid, u.text, json.dumps(u.keys, ensure_ascii=False), u.context)
+            "INSERT OR IGNORE INTO segments "
+            "(uid, text, keys_json, context, group_id, seq) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(u.uid, u.text, json.dumps(u.keys, ensure_ascii=False),
+              u.context, u.group_id, u.seq)
              for u in uniques])
         self.conn.commit()
 
@@ -80,7 +94,8 @@ class RunDB:
     def get(self, uid: str) -> Optional[dict]:
         row = self.conn.execute(
             "SELECT uid, text, keys_json, context, domain, confidence, status, "
-            "target, resolution, findings_json FROM segments WHERE uid = ?",
+            "target, resolution, findings_json, group_id, seq "
+            "FROM segments WHERE uid = ?",
             (uid,)).fetchone()
         return self._row(row) if row else None
 
@@ -88,18 +103,21 @@ class RunDB:
         marks = ",".join("?" * len(statuses))
         rows = self.conn.execute(
             f"SELECT uid, text, keys_json, context, domain, confidence, status, "
-            f"target, resolution, findings_json FROM segments "
-            f"WHERE status IN ({marks}) ORDER BY uid", statuses).fetchall()
+            f"target, resolution, findings_json, group_id, seq "
+            f"FROM segments WHERE status IN ({marks}) ORDER BY uid",
+            statuses).fetchall()
         return [self._row(r) for r in rows]
 
     def all_segments(self) -> List[dict]:
         rows = self.conn.execute(
             "SELECT uid, text, keys_json, context, domain, confidence, status, "
-            "target, resolution, findings_json FROM segments ORDER BY uid").fetchall()
+            "target, resolution, findings_json, group_id, seq "
+            "FROM segments ORDER BY uid").fetchall()
         return [self._row(r) for r in rows]
 
     def refs(self, *statuses: str) -> List[SegmentRef]:
-        return [SegmentRef(uid=s["uid"], domain=Domain(s["domain"]))
+        return [SegmentRef(uid=s["uid"], domain=Domain(s["domain"]),
+                           group_id=s.get("group_id"), seq=s.get("seq"))
                 for s in (self.by_status(*statuses) if statuses
                           else self.all_segments())]
 
@@ -115,6 +133,8 @@ class RunDB:
             "context": row[3], "domain": row[4], "confidence": row[5],
             "status": row[6], "target": row[7], "resolution": row[8],
             "findings": [Finding.model_validate(f) for f in json.loads(row[9])],
+            "group_id": row[10] if len(row) > 10 else None,
+            "seq": row[11] if len(row) > 11 else None,
         }
 
 

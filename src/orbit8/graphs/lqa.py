@@ -26,8 +26,10 @@ from ..gate_checks import (GateConfig, locked_in_target, run_gate,
 from ..glossary import Glossary
 from ..llm import Provider
 from ..memory import RunDB, TenantMemory, TranslationMemory
+from ..grouping import plan_similarity_batches, plan_story_batches
 from ..schemas import (BugType, Finding, LQAItem, LQAReport, Severity,
-                       StyleBrief, Verdict, VerdictDecision, VerifiedFinding)
+                       STORY_DOMAIN_VALUES, StyleBrief, Verdict,
+                       VerdictDecision, VerifiedFinding)
 
 
 def _string_type_for(row: dict) -> Optional[str]:
@@ -65,6 +67,30 @@ class LQAConfig:
     # tests/test_skill_docs.py so the two cannot drift again.
     batch_size: int = 20
     batch_size_story: int = 5
+    # How alike two sources must be to share a reviewer call. 0.6 on
+    # character-bigram overlap groups number/placeholder variants of one
+    # string ("+5 HP" / "+10 HP") without dragging in merely
+    # same-topic text.
+    similarity_threshold: float = 0.6
+    # FULL SCAN: every tier sees every string, instead of each tier only
+    # seeing what the previous one passed.
+    #
+    # The cascade was built as a COST ladder, and that logic held when T3
+    # was the expensive part of a scan. It no longer is: a full
+    # 1,349-string audit is cheap, and the filtering has a real price —
+    # a string with a trailing-space defect (T1) was never checked for
+    # inconsistency (T2) or meaning (T3), so its OTHER problems surfaced
+    # only on the next round trip, after the client had already seen the
+    # report. One scan that finds everything beats three that each find
+    # one thing.
+    #
+    # Off by default so a caller who wants the ladder still gets it; the
+    # CLI turns it on.
+    full_scan: bool = False
+    # Group an entity's fields (an item's name + its blurb) into one
+    # Critic call, from the UE asset path. Costs nothing when paths are
+    # absent — every row simply becomes its own entity.
+    batch_by_entity: bool = True
     deterministic_only: bool = False      # T1+T2 only, zero LLM calls
     second_layer: bool = True
     requeue: bool = True                  # flagged strings back to G3 review
@@ -132,7 +158,12 @@ def build_lqa_graph(ctx: LQAContext):
                     finding.tier = 1
                 found[row["uid"]] = findings
         return {"findings_t1": found,
-                "ledger": {"accepted": len(rows), "t1_flagged": len(found)}}
+                # `full_scan` rides in the ledger, not just the config:
+                # the report is the artifact a reader gets six weeks
+                # later, and "did every tier see every string?" must be
+                # answerable from it alone.
+                "ledger": {"accepted": len(rows), "t1_flagged": len(found),
+                           "full_scan": 1 if cfg.full_scan else 0}}
 
     # ------------------------------------- T2 project-level consistency
 
@@ -141,7 +172,8 @@ def build_lqa_graph(ctx: LQAContext):
         across different menus is invisible to any segment-scoped check —
         this pass holds the whole locale in scope."""
         t1 = state.get("findings_t1", {})
-        rows = [r for r in _accepted() if r["uid"] not in t1]
+        rows = (_accepted() if cfg.full_scan
+                else [r for r in _accepted() if r["uid"] not in t1])
         found: Dict[str, List[Finding]] = {}
         ledger = dict(state.get("ledger", {}))
         ledger["t2_input"] = len(rows)
@@ -206,12 +238,25 @@ def build_lqa_graph(ctx: LQAContext):
 
     # -------------------------------------------------- T3 semantic (LLM)
 
-    STORY_DOMAINS = {"dialogue", "marketing"}
 
     def tier3(state: LQAState) -> dict:
-        flagged = set(state.get("findings_t1", {})) | set(
-            state.get("findings_t2", {}))
-        survivors = [r for r in _accepted() if r["uid"] not in flagged]
+        t1_found = state.get("findings_t1", {})
+        t2_found = state.get("findings_t2", {})
+        flagged = set(t1_found) | set(t2_found)
+        # uid -> everything the deterministic tiers already established.
+        # Passed to the Critic so it does not spend the batch
+        # re-reporting a placeholder bug the gate proved, and instead
+        # looks for what it alone can see. Under full_scan a row reaches
+        # T3 even when T1 flagged it, so without this the Critic reviews
+        # a known-broken string with no idea it is known-broken — and a
+        # string carrying BOTH a mechanical and a semantic defect came
+        # back with only one of them.
+        prior: Dict[str, List[Finding]] = {}
+        for tier in (t1_found, t2_found):
+            for uid, fs in tier.items():
+                prior.setdefault(uid, []).extend(fs)
+        survivors = (_accepted() if cfg.full_scan
+                     else [r for r in _accepted() if r["uid"] not in flagged])
         ledger = dict(state.get("ledger", {}))
         ledger["t3_input"] = len(survivors)
         if cfg.deterministic_only or ctx.provider is None:
@@ -220,12 +265,32 @@ def build_lqa_graph(ctx: LQAContext):
         ledger["t3_ran"] = 1
         # Batch policy (docs/skills/lqa-batch-split.md): story n=5,
         # pure strings n=20 — one batch size fits neither.
-        story = [r for r in survivors if r["domain"] in STORY_DOMAINS]
-        strings = [r for r in survivors if r["domain"] not in STORY_DOMAINS]
-        batches: List[List[dict]] = []
-        for rows, size in ((story, cfg.batch_size_story),
-                           (strings, cfg.batch_size)):
-            batches += [rows[i:i + size] for i in range(0, len(rows), size)]
+        story = [r for r in survivors if r["domain"] in STORY_DOMAIN_VALUES]
+        strings = [r for r in survivors
+                   if r["domain"] not in STORY_DOMAIN_VALUES]
+        # TWO axes, because the two classes fail differently. Story is
+        # judged on voice and continuity, so a conversation must arrive
+        # whole. Pure strings fail on INCONSISTENCY — two near-identical
+        # sources rendered differently — which is invisible unless both
+        # land in the same call, and a blind slice almost guarantees they
+        # do not.
+        batches: List[List[dict]] = plan_story_batches(
+            story, max_size=cfg.batch_size_story)
+        batches += plan_similarity_batches(
+            strings, max_size=cfg.batch_size,
+            threshold=cfg.similarity_threshold,
+            # Homogeneous batches so `domain` below is never None: 9 of
+            # 9 batches used to mix ui/system/item_desc, which silently
+            # skipped the domain rubric for the whole corpus.
+            by_domain=True,
+            # One slot per distinct (source, target): several game keys
+            # can share one, and 9% of slots were duplicates of a
+            # judgment the Critic had already made in the same call.
+            collapse=True,
+            # An item's name beside its own description. Derived from
+            # the UE asset path, which this client's GUID game keys do
+            # not carry — `context` holds the `#:` reference.
+            by_entity=cfg.batch_by_entity)
         found: Dict[str, List[Finding]] = {}
         audit: List[dict] = []
         errors: List[dict] = []
@@ -235,6 +300,10 @@ def build_lqa_graph(ctx: LQAContext):
             items = [(r["uid"], r["text"], r["target"] or "") for r in batch]
             brief = (ctx.glossary.brief_for([r["text"] for r in batch])
                      if ctx.glossary else None)
+            # Only the findings for THIS batch's rows: the whole-run set
+            # would be prompt weight the Critic cannot act on, and would
+            # grow with corpus size.
+            known = [f for r in batch for f in prior.get(r["uid"], [])]
             # batches are homogeneous by construction (story vs strings),
             # so one domain selects the rubric for the whole batch
             domains = {r.get("domain") for r in batch}
@@ -242,6 +311,7 @@ def build_lqa_graph(ctx: LQAContext):
                 review, _fp = agents.review_batch(
                     ctx.provider, items, source_lang=cfg.source_lang,
                     target_lang=cfg.locale, game=cfg.game,
+                    known_findings=known or None,
                     glossary_brief=brief, style_brief=ctx.style_brief,
                     client_lang=cfg.client_lang,
                     style_guide=ctx.style_guide,
@@ -297,11 +367,19 @@ def build_lqa_graph(ctx: LQAContext):
                         and ctx.provider is not None)
         ledger["second_layer"] = int(second_layer)
 
-        for uid, findings in {**state.get("findings_t1", {}),
-                              **state.get("findings_t2", {})}.items():
-            verified.setdefault(uid, []).extend(
-                VerifiedFinding(finding=f).model_dump(mode="json")
-                for f in findings)
+        # Concatenate the tiers, never dict-merge them. `{**t1, **t2}`
+        # keys on uid, so a string flagged by BOTH tiers kept only T2's
+        # findings and silently lost T1's — a terminology defect
+        # disappearing because the same string also had a consistency
+        # one. In ladder mode the overlap was empty (T2 only saw T1
+        # survivors) so the bug was invisible; under full_scan every
+        # overlapping string hits it.
+        for tier_findings in (state.get("findings_t1", {}),
+                              state.get("findings_t2", {})):
+            for uid, findings in tier_findings.items():
+                verified.setdefault(uid, []).extend(
+                    VerifiedFinding(finding=f).model_dump(mode="json")
+                    for f in findings)
 
         audit = list(state.get("t3_audit", []))
 
@@ -312,9 +390,25 @@ def build_lqa_graph(ctx: LQAContext):
                 "finding": finding.model_dump(mode="json"),
                 "verdict": verdict.model_dump(mode="json") if verdict else None})
 
+        # The verifier is the longest phase and emitted NO progress at
+        # all: on a 1,233-row run it went silent for 40+ minutes while
+        # making one LLM call per finding, which is indistinguishable
+        # from a hang. An operator watching the log had no way to tell a
+        # working verifier from a wedged one — the same "silence looks
+        # like success" shape as the glossary-coverage gap.
+        pending = sum(len(f) for f in state.get("findings_t3", {}).values())
+        if ctx.on_progress and pending:
+            ctx.on_progress("verify_start", {"findings": pending})
+        done = 0
         for uid, findings in state.get("findings_t3", {}).items():
             row = ctx.run_db.get(uid)
             for finding in findings:
+                done += 1
+                # Every 10th, so a long phase is visibly alive without
+                # the log becoming a per-finding firehose.
+                if ctx.on_progress and done % 10 == 0:
+                    ctx.on_progress("verify_progress",
+                                    {"done": done, "of": pending})
                 if finding.bug_type.value in suppressed_types:
                     record(uid, finding, None, False, "suppressed")
                     continue
@@ -455,13 +549,28 @@ def verify_cascade(report: LQAReport) -> List[str]:
         return [f"cascade_ledger missing {missing} — "
                 f"one or more tiers never ran"]
 
-    # -- the telescope: each tier saw exactly what the previous one passed
-    check(led["t2_input"] == led["accepted"] - led["t1_flagged"],
-          f"T2 input {led['t2_input']} != accepted {led['accepted']} - "
-          f"T1 flagged {led['t1_flagged']}")
-    check(led["t3_input"] == led["t2_input"] - led["t2_flagged"],
-          f"T3 input {led['t3_input']} != T2 input {led['t2_input']} - "
-          f"T2 flagged {led['t2_flagged']}")
+    # -- coverage: what each tier actually saw.
+    #
+    # Two legal shapes, and the audit must not accept a run that is
+    # neither. In LADDER mode the counts telescope — each tier sees what
+    # the previous one passed. In FULL-SCAN mode every tier sees every
+    # accepted string, which is a stronger claim, not a weaker one.
+    # Checking only the telescope would reject a full scan; checking
+    # neither would let a tier silently skip strings.
+    if led.get("full_scan"):
+        check(led["t2_input"] == led["accepted"],
+              f"full scan: T2 input {led['t2_input']} != accepted "
+              f"{led['accepted']} — a tier skipped strings")
+        check(led["t3_input"] == led["accepted"],
+              f"full scan: T3 input {led['t3_input']} != accepted "
+              f"{led['accepted']} — a tier skipped strings")
+    else:
+        check(led["t2_input"] == led["accepted"] - led["t1_flagged"],
+              f"T2 input {led['t2_input']} != accepted {led['accepted']} - "
+              f"T1 flagged {led['t1_flagged']}")
+        check(led["t3_input"] == led["t2_input"] - led["t2_flagged"],
+              f"T3 input {led['t3_input']} != T2 input {led['t2_input']} - "
+              f"T2 flagged {led['t2_flagged']}")
     check(report.checked == led["accepted"],
           f"report.checked {report.checked} != ledger accepted "
           f"{led['accepted']}")

@@ -38,6 +38,13 @@ ALLOWED_SCRIPTS = {
 }
 
 # Targets whose locked terms legitimately inflect (case endings).
+# Valid `case` values for a glossary entry. Enumerated so a typo is a
+# loud error rather than a silent downgrade: an unrecognised value used
+# to fall through to `context`, which enforces nothing — reproducing the
+# exact failure shape that hid the BOSS bug, where a check that quietly
+# does not run looks identical to a check that passes.
+TERM_CASE_MODES = ("context", "exact", "sanctioned")
+
 INFLECTED_TARGETS = {"ru", "uk", "pl", "cs"}
 
 
@@ -55,10 +62,12 @@ class GateConfig:
     # what lets the gate accept "used to craft" without weakening into
     # fuzzy matching.
     term_forms: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    # source term -> "exact" | "context" (default). Capitalization is a
-    # STYLE question (rules CAP-*), not term identity: only a term
-    # explicitly marked `exact` — a proper name — may raise a casing
-    # finding here. Anything else is judged by the style rubric in T3.
+    # source term -> one of TERM_CASE_MODES ("context" default).
+    # Capitalization is usually a STYLE question (rules CAP-*) rather
+    # than term identity, so `context` does not enforce it and T3 judges
+    # it with surrounding context. `exact` is for proper names.
+    # `sanctioned` rejects only the all-caps screaming form — see
+    # `locked_in_target` for why that third mode had to exist.
     term_case: Dict[str, str] = field(default_factory=dict)
     dnt: List[str] = field(default_factory=list)
     length_ratio_bounds: tuple = (0.2, 5.0)
@@ -95,6 +104,13 @@ class GateConfig:
     # a fact about short labels, not a defect. Such strings need a real
     # per-widget max_len, not a ratio.
     min_width_for_ratio: int = 6
+    # Report width-ratio outliers as LOW/advisory rather than MEDIUM
+    # defects. Default ON: without real per-widget geometry the check
+    # cannot distinguish overflow from ordinary zh→en expansion, and it
+    # was measured at 16 of 22 false positives on adjudicated data.
+    # Set False on a project that supplies max_len and wants the
+    # heuristic treated as a defect.
+    width_ratio_advisory: bool = True
     ko_hanja_max_run: int = 3
     ko_hanja_ratio: float = 0.25
     # Style rules whose enforcement bin is "mechanical" (style_guide.py).
@@ -104,12 +120,34 @@ class GateConfig:
     style_guide: object = None
 
 
+def _scripts_for(lang: str) -> set:
+    """Expected scripts for a locale tag, falling back to its base tag.
+
+    `zh-CN` -> `zh`, `pt-BR` -> `pt`. An unknown language yields an
+    empty set, which callers read as "no expectation".
+    """
+    tag = (lang or "").lower()
+    if tag in ALLOWED_SCRIPTS:
+        return ALLOWED_SCRIPTS[tag]
+    return ALLOWED_SCRIPTS.get(tag.split("-")[0], set())
+
+
 def term_in_text(term: str, text: str) -> bool:
-    """CJK-safe term matching: ``\\b`` never fires next to Han characters,
-    so boundary anchors apply only on ASCII term edges."""
+    """CJK-safe term matching.
+
+    The docstring here used to claim CJK-safety while doing the
+    opposite: it anchored ASCII term edges with ``\\b``, and since
+    Python's ``\\w`` includes Han there is no boundary between 毁 and
+    the B of BOSS — so a Latin term embedded in Chinese matched
+    NOTHING. The guard is only meaningful against another Latin
+    character, so it is written that way. See `term_spans` for the
+    measured consequence.
+    """
     term_l, text_l = term.lower(), text.lower()
-    left = r"\b" if (term_l[:1].isascii() and term_l[:1].isalnum()) else ""
-    right = r"\b" if (term_l[-1:].isascii() and term_l[-1:].isalnum()) else ""
+    left = r"(?<![0-9A-Za-z])" if (term_l[:1].isascii()
+                                   and term_l[:1].isalnum()) else ""
+    right = r"(?![0-9A-Za-z])" if (term_l[-1:].isascii()
+                                   and term_l[-1:].isalnum()) else ""
     if not left and not right:
         return term_l in text_l
     return re.search(left + re.escape(term_l) + right, text_l) is not None
@@ -119,8 +157,22 @@ def term_spans(term: str, text: str) -> List[tuple]:
     """Every ``(start, end)`` where `term` matches, same rules as
     `term_in_text`. Positions are what makes longest-match possible."""
     term_l, text_l = term.lower(), text.lower()
-    left = r"\b" if (term_l[:1].isascii() and term_l[:1].isalnum()) else ""
-    right = r"\b" if (term_l[-1:].isascii() and term_l[-1:].isalnum()) else ""
+    # `\b` guards an ASCII term so "spirit" does not match inside
+    # "spirited". But Python's `\w` includes Han, so in CJK source there
+    # is NO boundary between 毁 and the B of BOSS and the term matched
+    # nothing at all: on project002 the glossary locked BOSS -> "Boss"
+    # while every occurrence shipped as "BOSS", because the term never
+    # reached the translator's brief or the gate.
+    #
+    # The guard is only meaningful against ANOTHER Latin letter, so it is
+    # expressed that way: forbid a Latin/digit neighbour rather than
+    # demand a word boundary. Han, punctuation and string edges all
+    # satisfy it, which is what makes an embedded Latin term reachable
+    # while "spirited" is still excluded.
+    left = r"(?<![0-9A-Za-z])" if (term_l[:1].isascii()
+                                   and term_l[:1].isalnum()) else ""
+    right = r"(?![0-9A-Za-z])" if (term_l[-1:].isascii()
+                                   and term_l[-1:].isalnum()) else ""
     pattern = left + re.escape(term_l) + right
     return [(m.start(), m.end()) for m in re.finditer(pattern, text_l)]
 
@@ -199,6 +251,40 @@ def applicable_terms(source: str,
     return applicable
 
 
+def _screams(locked: str, target: str) -> bool:
+    """Does `target` render `locked` in ALL-CAPS where it should not?
+
+    Only fires when the mandated form is NOT itself all-caps: a term
+    like "HP" is an initialism and its uppercase form is correct, so
+    flagging it would be nonsense. Single characters are excluded for
+    the same reason ("press A").
+
+    Compared per-word so a multi-word term is judged on the words that
+    carry the casing, not on its punctuation.
+    """
+    want_words = [w for w in re.findall(r"[0-9A-Za-z]+", locked) if w]
+    if not want_words:
+        return False
+    # A term whose own mandated form is all-caps has no screaming form.
+    if all(w.isupper() for w in want_words):
+        return False
+    # Inflected spans too: the screaming form of "Boss" appears as
+    # "BOSSES" as often as "BOSS", and judging only exact spans would
+    # let the plural through.
+    spans = term_spans(locked, target) or _inflected_spans(locked, target)
+    for start, end in spans:
+        got = target[start:end]
+        got_words = [w for w in re.findall(r"[0-9A-Za-z]+", got) if w]
+        # Ignore 1-char words: "A"/"I" are trivially uppercase.
+        judged = [w for w in got_words if len(w) > 1]
+        if not judged:
+            continue
+        if all(w.isupper() for w in judged) and any(
+                not w.isupper() for w in want_words if len(w) > 1):
+            return True
+    return False
+
+
 def locked_in_target(locked: str, target: str, target_lang: str,
                      morphology=None, variants: Iterable[str] = (),
                      forms: Optional[Dict[str, str]] = None,
@@ -219,21 +305,42 @@ def locked_in_target(locked: str, target: str, target_lang: str,
        live here: this function executes a profile, it does not know
        English or Russian.
 
-    ``case`` says whether capitalization is part of term IDENTITY. It is
-    "context" by default — a term names a WORD, and whether that word is
-    capitalized in a given sentence is a style rule (CAP-*), judged with
-    the surrounding context in T3. Only a term declared "exact" (a proper
-    name) is matched case-sensitively here.
+    ``case`` says whether capitalization is part of term IDENTITY:
+
+    - ``context`` (default) — any casing satisfies the term. A term names
+      a WORD; whether it is capitalized in a given sentence is a style
+      rule (CAP-*), judged with context in T3.
+    - ``exact`` — one casing only. For proper names.
+    - ``sanctioned`` — reject the SCREAMING form, accept any casing a
+      human would write. For the commonest real case, which neither
+      other mode fits: a word that is Title Case as a system name and
+      lowercase as a common noun, where the client has nonetheless
+      banned all-caps.
+
+      Measured on project002, whose glossary locks BOSS -> "Boss":
+      ``context`` let 8 casing defects the post-editor rejected go
+      unflagged, while ``exact`` caught them but also flagged "killed
+      the boss" and "a boss fight" — both ACCEPTED by that post-editor
+      as CAP-02/13 common-noun usage. ``sanctioned`` is the mode that
+      wants neither.
 
     Without a profile the legacy behaviour applies (stem tolerance for
     the inflected-target list), so callers that predate style guides keep
     working.
     """
+    if case not in TERM_CASE_MODES:
+        raise ValueError(
+            f"unknown glossary case mode {case!r} for term {locked!r} "
+            f"(expected one of {', '.join(TERM_CASE_MODES)}). Refusing to "
+            f"fall back to 'context', which would silently enforce "
+            f"nothing.")
     if case == "exact" and locked not in target:
         # A proper name whose casing is wrong: the WORD is present but
         # not in its mandated form, so this is a real finding.
         if term_in_text(locked, target):
             return False
+    if case == "sanctioned" and _screams(locked, target):
+        return False
     if term_in_text(locked, target):
         return True
     # A declared form is a base to inflect from, not a fixed string: a
@@ -426,6 +533,48 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
                      f"mapping in the export."),
             evidence=target[:80])]
 
+    # 2a. line structure (STY-08). The client rule requires `\r`/`\n`/`\`
+    #     counts and positions to match the source; it was classified
+    #     enforcement="llm" — a prompt suggestion — with no code
+    #     comparing them anywhere.
+    #
+    #     Scope is deliberately NARROW: a loss of BARE newlines, with UE
+    #     continuation markers (`\` + newline) excluded and additions
+    #     never flagged. Three formulations were measured against the
+    #     post-editor's own output, where any finding is false by
+    #     definition:
+    #
+    #       formulation                     FP on human   B1   B2
+    #       bare-\n loss (this one)                   3    4    5
+    #       any break-character loss                 16   15   37
+    #       rendered line-count drop                 16   15   38
+    #
+    #     The looser two detect far more, and are wrong far more: 16 of
+    #     their findings land on text a professional shipped. They fire
+    #     mostly where the source uses `\`+newline as a continuation
+    #     marker and the editor legitimately reflows the prose, or where
+    #     the editor ADDS breaks for readability — which no client rule
+    #     forbids.
+    #
+    #     Consequence to state plainly: this check does NOT catch most of
+    #     what batching does to line structure. Batched output tends to
+    #     emit `\` where the source had `\`+newline, and per-sentence
+    #     output emits `\n` — both differ from the editor, who preserves
+    #     `\`+newline verbatim. Distinguishing those from a legitimate
+    #     reflow needs the rendered widget, not the string, so it is left
+    #     to T3 rather than guessed at here. A narrow check that is right
+    #     beats a broad one that cries wolf on shipped text.
+    for brk, label in (("\n", "\\n"), ("\r", "\\r")):
+        hard_src = source.count(brk) - source.count("\\" + brk)
+        hard_tgt = target.count(brk) - target.count("\\" + brk)
+        if hard_src and hard_tgt < hard_src:
+            findings.append(Finding(
+                key=key, bug_type=BugType.MARKUP, severity=Severity.HIGH,
+                message=f"Line structure lost [STY-08]: source has "
+                        f"{hard_src} hard {label}, target has {hard_tgt}. "
+                        f"Recipe and multi-line UI text depends on these.",
+                evidence=target[:80]))
+
     # 2. placeholder / markup integrity (multiset equality)
     src_ph, tgt_ph = _extract_placeholders(source), _extract_placeholders(target)
     if src_ph != tgt_ph:
@@ -469,7 +618,16 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
     #    — "Error", "Text Block" and other dev-English placeholders are
     #    CORRECT when echoed verbatim, so identity is only evidence of an
     #    untranslated string when the source is actually in source_lang.
-    src_scripts_expected = ALLOWED_SCRIPTS.get(cfg.source_lang.lower(), set())
+    # Locale tags are looked up with a base-tag fallback: the table has
+    # `zh` and `zh-tw`, while po_scan passes `zh-CN`. The exact-match
+    # lookup missed, so `src_scripts_expected` came back EMPTY and
+    # `source_has_own_script` defaulted to True — disabling this guard
+    # for the one language pair the project actually runs. Result on
+    # 1,233 rows: 6 false positives on strings that are identical
+    # because they contain nothing to translate ("(0/3)", "Lv.1"),
+    # all of which the post-editor accepted. Regional tags are the norm
+    # (pt-BR, zh-Hans, en-GB), so normalise rather than add one row.
+    src_scripts_expected = _scripts_for(cfg.source_lang)
     source_has_own_script = not src_scripts_expected or any(
         re.search(f"[{SCRIPT_RANGES[s]}]", stripped_src)
         for s in src_scripts_expected)
@@ -492,8 +650,14 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
                     if f.bug_type != BugType.TERMINOLOGY]
 
     # 5. source-script leakage (e.g. Han characters in a ru target)
-    src_scripts = ALLOWED_SCRIPTS.get(cfg.source_lang.lower(), set())
-    tgt_scripts = ALLOWED_SCRIPTS.get(cfg.target_lang.lower(), set())
+    # Same base-tag fallback as check 4. With an exact-match lookup and
+    # source_lang="zh-CN", `src_scripts` was EMPTY, so `src - tgt` was
+    # empty and this HIGH-severity check never ran at all: Han
+    # characters leaking into an English target went undetected for the
+    # project's actual locale. A check that silently does not run is
+    # indistinguishable from one that passes.
+    src_scripts = _scripts_for(cfg.source_lang)
+    tgt_scripts = _scripts_for(cfg.target_lang)
     for script in src_scripts - tgt_scripts:
         leaked = re.findall(f"[{SCRIPT_RANGES[script]}]+", stripped_tgt)
         leaked = [run for run in leaked
@@ -535,21 +699,45 @@ def run_gate(key: str, source: str, target: str, cfg: GateConfig,
                     f"({display_width(target)} > {max_len} columns).",
             evidence=target[:80]))
 
-    # 6b. display-width expansion, scoped by string type. This is the check
-    #     that catches UI overflow when no per-widget max_len exists — the
-    #     normal case, since a .po carries no geometry. MEDIUM on purpose:
-    #     it is a risk signal for a post-editor, not proof of a defect, and
-    #     the only certain answer comes from seeing the string in-game.
+    # 6b. display-width expansion, scoped by string type. Catches UI
+    #     overflow when no per-widget max_len exists — the normal case,
+    #     since a .po carries no geometry.
+    #
+    #     Now LOW severity, and excluded from client bug reports by
+    #     default (`width_ratio_advisory`). Measured on 174
+    #     professionally adjudicated zh→en strings: this check produced
+    #     3 true positives and 16 FALSE positives — 16 of the 22 total
+    #     false positives, a fixed block no other layer clears. Turning
+    #     it off costs 1 true positive and lifts precision from 62.7% to
+    #     83.7%.
+    #
+    #     Worse than a low threshold: on this corpus width has no
+    #     discriminative power at all. Strings the post-editor ACCEPTED
+    #     are wider on average than those they rejected (UI 2.12x vs
+    #     1.94x, System 2.03x vs 1.94x), so no re-tuning of the ceiling
+    #     recovers precision. The budget was honestly derived — p95 of
+    #     9,597 shipped en→zh pairs from two commercial titles — and its
+    #     own comment flagged that those corpora ran the opposite
+    #     direction. Expansion INTO English is normal, not suspicious.
+    #
+    #     Kept rather than deleted because it is real signal on projects
+    #     that supply geometry; check 6 (hard max_len) is the reliable
+    #     path and runs above.
     budget = cfg.width_budget.get(string_type or "") if string_type else None
     if budget and display_width(stripped_src) >= cfg.min_width_for_ratio:
         ratio = width_ratio(stripped_src, stripped_tgt)
         if ratio > budget:
             findings.append(Finding(
-                key=key, bug_type=BugType.LENGTH, severity=Severity.MEDIUM,
+                key=key, bug_type=BugType.LENGTH,
+                severity=(Severity.LOW if cfg.width_ratio_advisory
+                          else Severity.MEDIUM),
                 message=f"{string_type} target renders "
                         f"{display_width(stripped_tgt)} columns vs source "
                         f"{display_width(stripped_src)} ({ratio:.1f}x, "
-                        f"budget {budget}x) — UI overflow risk.",
+                        f"budget {budget}x) — UI overflow RISK, unverified: "
+                        f"no per-widget width is known for this string, and "
+                        f"expansion into English is normal. Confirm in-game "
+                        f"before filing.",
                 evidence=target[:80]))
 
     # 7. length-ratio sanity (loose; expansion tuning comes from style

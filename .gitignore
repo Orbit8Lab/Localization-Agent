@@ -87,3 +87,22 @@ docs/presentation/
 ._*
 Thumbs.db
 desktop.ini
+
+# IAAI experiment scratch: regenerated PO + per-condition scan outputs
+docs/IAAI_Manuscript/experiments/work/
+
+# IAAI experiments: client-derived corpora and per-row results stay LOCAL.
+# The repo is public; project002 source text, the client's glossary and
+# their hand-written style rules are proprietary. Scripts and aggregate
+# findings are committed so the work is reproducible by anyone WITH the
+# corpus, without republishing the corpus itself.
+docs/IAAI_Manuscript/experiments/data/
+docs/IAAI_Manuscript/experiments/results/*.json
+docs/IAAI_Manuscript/experiments/results/*.log
+# Write-ups quote game strings and locked glossary terms verbatim as
+# evidence (that is what makes them evidence). Unreleased game content
+# does not belong on a public remote; these stay local until the client
+# clears what may appear in the published paper.
+docs/IAAI_Manuscript/experiments/FINDINGS.md
+docs/IAAI_Manuscript/DRAFT_experimental_sections.md
+docs/IAAI_Manuscript/EXPERIMENT_STATUS.md

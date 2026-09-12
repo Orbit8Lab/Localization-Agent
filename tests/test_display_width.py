@@ -71,12 +71,35 @@ def _length_findings(source, target, **kw):
 
 
 def test_ui_overflow_is_flagged():
-    """8 source columns → 29: 3.6x, past the 2.4x UI budget."""
+    """8 source columns → 29: 3.6x, past the 2.4x UI budget.
+
+    Severity is LOW, not MEDIUM. Measured on 174 professionally
+    adjudicated zh→en strings this check produced 3 true positives
+    against 16 false ones — 16 of 22 total FPs — and strings the
+    post-editor ACCEPTED were WIDER on average than those they
+    rejected, so the ratio carries no signal in this direction. It is
+    kept because it is real signal where per-widget geometry exists,
+    but it is a risk flag for a human, not a defect claim.
+    """
     found = _length_findings("确定取消", "Confirm and Cancel Everything",
                              string_type="UI")
     assert len(found) == 1
+    assert found[0].severity is Severity.LOW
+    assert "overflow RISK, unverified" in found[0].message
+
+
+def test_the_ratio_check_can_be_treated_as_a_defect_when_geometry_exists():
+    """A project that supplies max_len may want the heuristic escalated;
+    `width_ratio_advisory=False` is that switch."""
+    from dataclasses import replace
+    from orbit8.gate_checks import GateConfig, run_gate
+    cfg = replace(GateConfig(target_lang="en"), width_ratio_advisory=False)
+    found = [f for f in run_gate(key="k", source="确定取消",
+                                 target="Confirm and Cancel Everything",
+                                 cfg=cfg, string_type="UI")
+             if f.bug_type is BugType.LENGTH]
+    assert len(found) == 1
     assert found[0].severity is Severity.MEDIUM
-    assert "overflow risk" in found[0].message
 
 
 def test_a_normal_expansion_passes():
@@ -165,10 +188,16 @@ def test_hard_limit_passes_when_it_fits():
 
 
 def test_hard_limit_and_budget_are_independent():
-    """Both can fire; they answer different questions."""
+    """Both can fire; they answer different questions.
+
+    The point of the test is the independence, not the severities: a
+    hard max_len breach is a certain defect (HIGH) while the ratio is
+    an unverified risk (LOW, see above).
+    """
     found = _length_findings("确定取消", "Confirm and Cancel Everything",
                              max_len=10, string_type="UI")
-    assert {f.severity for f in found} == {Severity.HIGH, Severity.MEDIUM}
+    assert {f.severity for f in found} == {Severity.HIGH, Severity.LOW}
+    assert len(found) == 2
 
 
 # --------------------------------------------- widget class from the path

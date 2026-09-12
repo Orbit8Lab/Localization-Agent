@@ -61,11 +61,19 @@ class UniqueString(Strict):
 
     ``keys`` holds every real game key sharing this source text; fan-out back
     to game keys happens only at emission.
+
+    ``group_id``/``seq`` carry the conversation this string belongs to and
+    its position in it (grouping.py). They are what lets story batching
+    keep an exchange whole instead of slicing it every N strings — a
+    translator that sees a whole scene keeps register and pronouns
+    consistent; one that sees five lines from three scenes cannot.
     """
     uid: str
     text: str
     keys: List[str]
     context: Optional[str] = None
+    group_id: Optional[str] = None
+    seq: Optional[int] = None
 
 
 class SourceBatch(Strict):
@@ -80,6 +88,9 @@ class IngestReport(Strict):
     total_chars: int
     dedup_ratio: float
     per_file: Dict[str, int] = Field(default_factory=dict)
+    # What conversation grouping achieved (grouping.group_stats). Empty on
+    # jobs ingested before grouping existed — the field is additive.
+    grouping: Dict[str, int] = Field(default_factory=dict)
 
 
 # ------------------------------------------------------------------ intake
@@ -128,6 +139,13 @@ class Domain(str, Enum):
 
 # Domains whose policy mandates human post-editing regardless of gate results.
 MTPE_DOMAINS = {Domain.DIALOGUE, Domain.MARKETING}
+
+# Narrative/persuasive prose (docs/skills/lqa-batch-split.md). These batch
+# small and by conversation; everything else batches large and by
+# similarity. Defined ONCE here because translate and LQA both split on
+# it, and two copies would drift the moment a domain is added.
+STORY_DOMAINS = {Domain.DIALOGUE, Domain.MARKETING}
+STORY_DOMAIN_VALUES = {d.value for d in STORY_DOMAINS}
 
 
 class DomainLabelItem(Strict):
@@ -486,6 +504,12 @@ class SegmentRef(Strict):
     the checkpointer."""
     uid: str
     domain: Domain = Domain.UI
+    # The conversation this segment belongs to and where it sits in it.
+    # Carried on the ref (not looked up per batch) because batching reads
+    # it for every pending segment and a per-uid query would be N round
+    # trips to decide one batch layout.
+    group_id: Optional[str] = None
+    seq: Optional[int] = None
 
 
 class SmokeResult(Strict):
