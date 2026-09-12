@@ -1,0 +1,46 @@
+# fly.toml app configuration file generated for orbit8-agent on 2026-09-11T19:57:12-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'orbit8-agent'
+primary_region = 'sjc'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  ORBIT8_ENV = 'production'
+  ORBIT8_JOBS_ROOT = '/data/jobs'
+  ORBIT8_MAX_UPLOAD_BYTES = '104857600'
+  ORBIT8_PORT = '8080'
+
+[[mounts]]
+  source = 'orbit8_data'
+  destination = '/data'
+  initial_size = '10gb'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 40
+    soft_limit = 20
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '10s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  size = 'shared-cpu-2x'
+  memory = '2gb'
+  cpus = 2
+  memory_mb = 2048
