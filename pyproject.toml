@@ -17,6 +17,12 @@ dev = ["pytest>=8"]
 # one every other provider shares, so it needs its own SDK. Optional: the
 # import is lazy and no other provider depends on it.
 anthropic = ["anthropic>=0.40"]
+# Reference-based MT metrics for the IAAI evaluation only. Optional
+# because nothing in the pipeline computes them: they score against a
+# human reference, and this project's quality standard is the client's
+# glossary and style rules, which BLEU cannot see. Kept out of the core
+# so a deployment never carries an evaluation-only dependency.
+metrics = ["sacrebleu>=2.4"]
 
 [project.scripts]
 orbit8 = "orbit8.cli:main"

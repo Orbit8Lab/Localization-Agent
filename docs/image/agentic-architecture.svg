@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 30 1180 372" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="#475569"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="#059669"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="#b45309"/>
+    </marker>
+  </defs>
+
+  <!-- ============ row 1: the request/decide/act loop ============ -->
+  <rect x="16" y="40" width="128" height="72" rx="8" fill="#f8fafc" stroke="#475569" stroke-width="1.5"/>
+  <text x="80" y="82" font-size="17" font-weight="700" text-anchor="middle" fill="#1f2937">OPERATOR</text>
+
+  <path d="M148 76 H198" stroke="#475569" stroke-width="1.6" marker-end="url(#a)" fill="none"/>
+
+  <rect x="202" y="52" width="206" height="60" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="305" y="82" font-size="17" font-weight="700" text-anchor="middle" fill="#1d4ed8">ORCHESTRATOR</text>
+
+  <path d="M412 76 H462" stroke="#475569" stroke-width="1.6" marker-end="url(#a)" fill="none"/>
+  <text x="437" y="68" font-size="13.5" text-anchor="middle" fill="#64748b">JSON</text>
+
+  <rect x="466" y="52" width="188" height="60" rx="8" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="560" y="82" font-size="17" font-weight="700" text-anchor="middle" fill="#047857">JOB CONTROLLER</text>
+
+  <path d="M658 76 H708" stroke="#059669" stroke-width="1.6" marker-end="url(#ag)" fill="none"/>
+
+  <rect x="712" y="52" width="182" height="60" rx="8" fill="#f8fafc" stroke="#475569" stroke-width="1.5"/>
+  <text x="803" y="82" font-size="17" font-weight="700" text-anchor="middle" fill="#1f2937">TOOLS  (21)</text>
+
+  <!-- sandbox escape hatch -->
+  <path d="M803 118 V182" stroke="#b45309" stroke-width="1.6" marker-end="url(#ar)" fill="none"/>
+  <rect x="668" y="186" width="272" height="46" rx="8" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+  <text x="804" y="212" font-size="17" font-weight="700" text-anchor="middle" fill="#b45309">SANDBOX — no tool fits</text>
+
+  <!-- result back to orchestrator -->
+  <path d="M666 132 V152 H420 Q408 152 408 140 V96" stroke="#475569" stroke-width="1.4"
+        marker-end="url(#a)" fill="none" stroke-dasharray="4 3"/>
+  <text x="540" y="148" font-size="13.5" text-anchor="middle" fill="#64748b">result → next decision</text>
+
+  <!-- ============ row 2: memory ============ -->
+  <rect x="16" y="170" width="628" height="96" rx="8" fill="#faf5ff" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="30" y="192" font-size="17" font-weight="700" fill="#6d28d9">MEMORY</text>
+  <rect x="30" y="210" width="140" height="42" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="100" y="236" font-size="15" text-anchor="middle" fill="#5b21b6">turn</text>
+  <rect x="182" y="210" width="140" height="42" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="252" y="236" font-size="15" text-anchor="middle" fill="#5b21b6">session</text>
+  <rect x="334" y="210" width="140" height="42" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="404" y="236" font-size="15" text-anchor="middle" fill="#5b21b6">job</text>
+  <rect x="486" y="210" width="140" height="42" rx="6" fill="#ffffff" stroke="#7c3aed"/>
+  <text x="556" y="236" font-size="15" text-anchor="middle" fill="#5b21b6">tenant</text>
+
+
+  <!-- ============ row 3: self-improvement ============ -->
+  <rect x="16" y="300" width="924" height="88" rx="8" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.8"/>
+  <text x="30" y="322" font-size="17" font-weight="700" fill="#0369a1">SELF-IMPROVEMENT</text>
+  <rect x="26" y="332" width="164" height="42" rx="6" fill="#ffffff" stroke="#0284c7"/>
+  <text x="108" y="358" font-size="15" text-anchor="middle" fill="#075985">observation log</text>
+  <path d="M194 353 H218" stroke="#0284c7" stroke-width="1.5" marker-end="url(#a)" fill="none"/>
+  <rect x="222" y="332" width="164" height="42" rx="6" fill="#ffffff" stroke="#0284c7"/>
+  <text x="304" y="358" font-size="15" text-anchor="middle" fill="#075985">utility + decay</text>
+  <path d="M390 353 H414" stroke="#0284c7" stroke-width="1.5" marker-end="url(#a)" fill="none"/>
+  <rect x="418" y="332" width="178" height="42" rx="6" fill="#ffffff" stroke="#0284c7"/>
+  <text x="507" y="358" font-size="15" text-anchor="middle" fill="#075985">promotion candidate</text>
+  <path d="M600 353 H624" stroke="#0284c7" stroke-width="1.5" marker-end="url(#a)" fill="none"/>
+  <rect x="628" y="332" width="158" height="42" rx="6" fill="#fffbeb" stroke="#d97706"/>
+  <text x="707" y="358" font-size="15" text-anchor="middle" fill="#b45309">HUMAN approves</text>
+  <path d="M790 353 H814" stroke="#0284c7" stroke-width="1.5" marker-end="url(#a)" fill="none"/>
+  <rect x="818" y="332" width="122" height="42" rx="6" fill="#ffffff" stroke="#0284c7"/>
+  <text x="879" y="358" font-size="15" text-anchor="middle" fill="#075985">active skill</text>
+
+  <!-- ============ right rail: artifacts ============ -->
+  <rect x="952" y="52" width="212" height="200" rx="8" fill="#f8fafc" stroke="#334155" stroke-width="1.8"/>
+  <text x="1058" y="74" font-size="17" font-weight="700" text-anchor="middle" fill="#1f2937">ARTIFACT TREE</text>
+  <rect x="964" y="84" width="188" height="26" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="1058" y="101" font-size="15" text-anchor="middle" fill="#334155">s1/strings.json</text>
+  <rect x="964" y="116" width="188" height="26" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="1058" y="133" font-size="15" text-anchor="middle" fill="#334155">s3/glossary.v1.json</text>
+  <rect x="964" y="148" width="188" height="26" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="1058" y="165" font-size="15" text-anchor="middle" fill="#334155">s4/attempt-02/…</text>
+  <rect x="964" y="180" width="188" height="26" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="1058" y="197" font-size="15" text-anchor="middle" fill="#334155">s5/lqa_report.json</text>
+  <rect x="964" y="212" width="188" height="26" rx="5" fill="#ffffff" stroke="#94a3b8"/>
+  <text x="1058" y="229" font-size="15" text-anchor="middle" fill="#334155">exports/ · trace</text>
+
+  <path d="M898 76 H956" stroke="#059669" stroke-width="1.6" marker-end="url(#ag)" fill="none"/>
+  <text x="927" y="68" font-size="13.5" text-anchor="middle" fill="#059669">writes</text>
+
+  <!-- ============ footer rule ============ -->
+</svg>

@@ -14,8 +14,8 @@
   <!-- Human band -->
   <rect x="48" y="116" width="860" height="130" rx="14" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
   <text x="72" y="152" font-size="21" font-weight="700" fill="#b45309">HUMANS — decide</text>
-  <text x="72" y="182" font-size="16" fill="#78350f">Gate approvals G0–G5 recorded as data · standard PE forms with fixed decision vocabulary</text>
-  <text x="72" y="208" font-size="16" fill="#78350f">Incomplete decisions are reported, never guessed · humans see decisions, not corpora</text>
+  <text x="72" y="182" font-size="16" fill="#78350f">Gate approvals recorded as data · PE forms with a fixed</text>
+  <text x="72" y="208" font-size="16" fill="#78350f">decision vocabulary · humans see decisions, not corpora</text>
   <g>
     <rect x="700" y="130" width="180" height="34" rx="8" fill="#ffffff" stroke="#d97706"/>
     <text x="790" y="152" font-size="14" text-anchor="middle" fill="#b45309">MTPE / LQA / Glossary forms</text>
