@@ -32,6 +32,7 @@ from ..controller import Job
 from ..schemas import IntakeBrief
 from ..tenancy import mixed_tenant_warning
 from .auth import build_auth_dependency, users_from_env
+from .chat import register as register_chat
 from .runner import JobRunner
 
 # Uploads are capped here rather than at the proxy: the limit is a
@@ -293,6 +294,10 @@ def create_app(jobs_root: Optional[Path] = None,
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no such artifact")
         return FileResponse(path, media_type="application/json",
                             filename=f"{job.job_id}-{stage}-{name}.json")
+
+    # The assistant reuses this app's auth and job lookup so it cannot
+    # become a way around either.
+    register_chat(app, get_job, require_user)
 
     return app
 
