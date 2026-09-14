@@ -44,3 +44,6 @@ module-name = "orbit8"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[license]
+license = "FSL-1.1-ALv2"
