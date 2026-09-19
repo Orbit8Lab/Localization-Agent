@@ -1,0 +1,21 @@
+name: Question
+description: You are not sure whether something is working correctly.
+title: "[question] "
+labels: ["needs-triage", "type:question"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Use this when you cannot tell whether the system is wrong or you
+        are. Either answer is useful: a real bug, or a gap in how the
+        system explains itself — which is its own kind of problem.
+  - type: input
+    id: job_id
+    attributes:
+      label: Job ID (if it is about a specific job)
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you unsure about?
+    validations:
+      required: true

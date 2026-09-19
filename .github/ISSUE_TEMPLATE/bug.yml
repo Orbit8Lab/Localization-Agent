@@ -1,0 +1,71 @@
+name: Bug report
+description: Something the system did that it should not have done.
+title: "[bug] "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **You do not need to know which part of the system is at fault.**
+        Describe what you saw; someone will sort out where it belongs.
+
+        If you are not sure whether something is a bug, report it anyway
+        and say so in the last box. "I could not tell if this was right"
+        is useful information.
+
+  - type: input
+    id: job_id
+    attributes:
+      label: Job ID
+      description: >
+        From the console, under the game name — like
+        `job-20260912-4599e0e7`. This is the single most useful thing in
+        the report: with it, an engineer can reproduce from the artifacts
+        instead of guessing.
+      placeholder: job-20260912-4599e0e7
+    validations:
+      required: false
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: What you did, and what the system did.
+      placeholder: |
+        I uploaded the SongOfKings export and clicked Approve G1.
+        The page showed "Waiting on a gate" again, with no error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      placeholder: I expected the job to move on to translation.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: How much did this get in your way?
+      description: >
+        Your read on impact, not a formal severity — the triager sets
+        that. Answer from your own experience of it.
+      options:
+        - I could not continue at all
+        - I found a way around it
+        - It was confusing, but I got there
+        - It looked wrong but I am not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: anything_else
+    attributes:
+      label: Anything else
+      description: >
+        Screenshots help a lot. Paste them here. If a number or a piece
+        of text looked wrong, include it.
+    validations:
+      required: false
