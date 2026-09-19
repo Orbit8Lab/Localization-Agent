@@ -1,0 +1,33 @@
+name: Feature or improvement
+description: Something the system should do, or should do better.
+title: "[feature] "
+labels: ["needs-triage", "type:feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is hard right now
+      description: >
+        Describe the problem, not the solution. "I cannot tell which
+        jobs need me" leads somewhere better than "add a filter".
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind (optional)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often does this come up?
+      options:
+        - Every job
+        - Most jobs
+        - Occasionally
+        - Once so far
+    validations:
+      required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: How to write a report we can act on
+    url: https://github.com/Orbit8Lab/Localization-Agent/blob/main/docs/REPORTING.md
+    about: One page. What to put in each box, and why the job ID matters.
+  - name: How reports get sorted (for triagers)
+    url: https://github.com/Orbit8Lab/Localization-Agent/blob/main/docs/TRIAGE.md
+    about: What the labels mean and how an issue reaches a sprint.
