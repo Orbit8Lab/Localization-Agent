@@ -182,18 +182,8 @@ def create_app(jobs_root: Optional[Path] = None,
         # size cap while writing: reading first and checking after is how
         # a large upload becomes an OOM.
         received = root / jid / "10-received"
-        received.mkdir(parents=True, exist_ok=True)
-        dest = received / Path(file.filename or "source.bin").name
-        written = 0
         try:
-            with dest.open("wb") as out:
-                while chunk := await file.read(1024 * 1024):
-                    written += len(chunk)
-                    if written > MAX_UPLOAD_BYTES:
-                        raise HTTPException(
-                            status.HTTP_413_CONTENT_TOO_LARGE,
-                            f"upload exceeds {MAX_UPLOAD_BYTES} bytes")
-                    out.write(chunk)
+            dest = await _save_upload(file, received)
         except HTTPException:
             shutil.rmtree(root / jid, ignore_errors=True)
             raise
@@ -253,6 +243,45 @@ def create_app(jobs_root: Optional[Path] = None,
         run.start(job.job_id)
         return _detail(job, run)
 
+    def _require_idle(job: Job) -> None:
+        if run.state(job.job_id).status == "running":
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "job is running; wait for it to stop")
+
+    @app.delete("/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT,
+                dependencies=[Depends(require_user)])
+    def delete_job(job: Job = Depends(get_job)) -> None:
+        """Remove a job and everything under it (upload, artifacts).
+        Refused while a worker is running, since it would be writing
+        into a tree that is being deleted."""
+        _require_idle(job)
+        shutil.rmtree(job.store.job_dir)
+
+    @app.put("/jobs/{job_id}/source", response_model=JobDetail,
+             dependencies=[Depends(require_user)])
+    async def replace_source(file: UploadFile = File(...),
+                             job: Job = Depends(get_job)) -> JobDetail:
+        """Swap the uploaded source file ("renew"). Only allowed before
+        ingest has produced `strings`: after that, every downstream
+        artifact derives from the old file, and silently swapping it
+        would make the tree lie. Later changes belong to the incremental
+        drop flow."""
+        _require_idle(job)
+        if job.store.exists(1, "strings"):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "source already ingested; cannot replace it in place")
+        received = job.store.job_dir / "10-received"
+        old = [p for p in received.glob("*") if p.is_file()]
+        dest = await _save_upload(file, received)
+        for path in old:
+            if path != dest:
+                path.unlink()
+        control = job.control
+        control["source_files"] = [str(dest)]
+        job.store.save_control(control)
+        return _detail(job, run)
+
     # --------------------------------------------------------- artifacts
 
     @app.get("/jobs/{job_id}/artifacts", response_model=List[ArtifactRef],
@@ -300,6 +329,27 @@ def create_app(jobs_root: Optional[Path] = None,
     register_chat(app, get_job, require_user)
 
     return app
+
+
+async def _save_upload(file: UploadFile, received: Path) -> Path:
+    """Stream an upload into `received`, enforcing the size cap while
+    writing. On overflow the partial file is removed and 413 raised."""
+    received.mkdir(parents=True, exist_ok=True)
+    dest = received / Path(file.filename or "source.bin").name
+    written = 0
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status.HTTP_413_CONTENT_TOO_LARGE,
+                        f"upload exceeds {MAX_UPLOAD_BYTES} bytes")
+                out.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+    return dest
 
 
 # ------------------------------------------------------------- rendering

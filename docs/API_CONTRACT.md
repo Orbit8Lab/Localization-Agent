@@ -94,6 +94,16 @@ Resume an idle job (after a restart, a crash, or `autostart=false`).
 Idempotent: calling it on a running job is a no-op, so a retrying client
 cannot start two workers on one artifact tree.
 
+### `DELETE /jobs/{job_id}` → `204`
+Removes the job and its whole artifact tree. `409` while the job is
+running. `404` unknown job.
+
+### `PUT /jobs/{job_id}/source` → `JobDetail`
+`multipart/form-data` with `file`. Replaces the uploaded source file
+("renew"). `409` if the job is running or the source was already
+ingested (`s1/strings` exists) — later changes belong to the
+incremental-drop flow. Same size cap as `POST /jobs`.
+
 ### `GET /jobs/{job_id}/artifacts` → `ArtifactRef[]`
 ### `GET /jobs/{job_id}/artifacts/{stage}/{name}?attempt=` → JSON file
 `attempt` is only meaningful for stages 4 and 5 (the attempt-versioned
