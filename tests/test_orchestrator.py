@@ -49,6 +49,30 @@ def test_status_then_respond(job: Job):
     assert '"phase": "INTAKE"' in provider.prompts[1]
 
 
+def test_empty_respond_is_retried_not_shown(job: Job):
+    provider = ScriptedProvider([
+        _call("status"),
+        _call("respond", message=""),
+        _call("respond", message="No files produced yet."),
+    ])
+    chat = ChatOrchestrator(job, provider, operator="tian", dry_run=True)
+    reply = chat.turn("What files has it produced?")
+    assert reply == "No files produced yet."
+    assert "empty message" in provider.prompts[2]
+
+
+def test_empty_respond_twice_gets_readable_fallback(job: Job):
+    provider = ScriptedProvider([
+        _call("status"),
+        _call("respond", message=None),
+        _call("respond", message="  "),
+    ])
+    chat = ChatOrchestrator(job, provider, operator="tian", dry_run=True)
+    reply = chat.turn("What files has it produced?")
+    assert "(empty reply)" not in reply
+    assert "status" in reply
+
+
 def test_next_step_and_gate_stop(job: Job):
     provider = ScriptedProvider([
         _call("next_step"),
