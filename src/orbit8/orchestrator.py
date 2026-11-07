@@ -1673,6 +1673,19 @@ class ChatOrchestrator:
             "limit.")
         return "\n".join(lines)
 
+    @staticmethod
+    def _empty_reply_fallback(evidence: List[str]) -> str:
+        """Readable answer when the model returns an empty `respond` twice."""
+        tools = [e[len("[tool] "):].split("(", 1)[0]
+                 for e in evidence if e.startswith("[tool] ")]
+        if not tools:
+            return ("I couldn't produce an answer to that. Please try "
+                    "rephrasing the question.")
+        return ("I looked into this (" + ", ".join(dict.fromkeys(tools))
+                + ") but couldn't put together a clear answer. Please "
+                "ask again, or narrow the question — for example, a "
+                "specific stage or file.")
+
     def _retire_evidence(self, evidence: List[str]) -> None:
         """Move this turn's tool results down into history.
 
@@ -1699,6 +1712,7 @@ class ChatOrchestrator:
         evidence: List[str] = []
         # (tool, args, error) -> how many times it has failed identically.
         repeats: Dict[tuple, int] = {}
+        empty_retried = False
         for _ in range(max_steps_per_turn()):
             self.on_start("(thinking)", {})
             think_started = time.monotonic()
@@ -1709,7 +1723,19 @@ class ChatOrchestrator:
             self._trace("decide", tool=call.tool, args=call.args,
                         seconds=round(time.monotonic() - think_started, 2))
             if call.tool == "respond":
-                reply = call.message or "(empty reply)"
+                reply = (call.message or "").strip()
+                if not reply and not empty_retried:
+                    # One nudge: the model chose `respond` with no text.
+                    empty_retried = True
+                    self._trace("empty_respond", retry=True)
+                    evidence.append(
+                        "[system] Your last `respond` had an empty "
+                        "message. Answer the operator now in plain "
+                        "language, using the tool results above. If "
+                        "nothing was found, say so.")
+                    continue
+                if not reply:
+                    reply = self._empty_reply_fallback(evidence)
                 self._retire_evidence(evidence)
                 self.history.append(("operator", user_msg))
                 self.history.append(("orbit8", reply))
